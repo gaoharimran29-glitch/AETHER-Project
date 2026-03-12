@@ -3,14 +3,16 @@ from pydantic import BaseModel
 from typing import List, Dict
 import redis
 import json
+import numpy as np
+from spatial.kd_tree import check_for_conjunctions
+from physics.rk4_integrator import rk4_step
 
 app = FastAPI()
 
 # Redis Connection
-# Docker mein 'redis' host use hoga, local testing mein 'localhost'
 r = redis.Redis(host='localhost', port=6379, decode_responses=True)
 
-# Data Models (Jo PDF mein diya hai)
+# Data Models
 class Vector3(BaseModel):
     x: float
     y: float
@@ -18,7 +20,7 @@ class Vector3(BaseModel):
 
 class SpaceObject(BaseModel):
     id: str
-    type: str # 'SATELLITE' or 'DEBRIS'
+    type: str 
     r: Vector3
     v: Vector3
 
@@ -27,64 +29,110 @@ class TelemetryRequest(BaseModel):
     objects: List[SpaceObject]
 
 @app.post("/api/telemetry")
-async def ingest_telemetry(data: TelemetryRequest, background_tasks: BackgroundTasks):
-    # 1. Sabse pehle Redis mein data save karo
+async def ingest_telemetry(data: TelemetryRequest):
     for obj in data.objects:
         obj_data = {
             "id": obj.id,
             "type": obj.type,
             "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
             "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
-            "fuel": 50.0 if obj.type == "SATELLITE" else 0.0, # Initial fuel
+            "fuel": 50.0 if obj.type == "SATELLITE" else 0.0,
             "last_update": data.timestamp
         }
-        # Redis key format: 'SATELLITE:SAT-01' or 'DEBRIS:DEB-01'
         r.set(f"{obj.type}:{obj.id}", json.dumps(obj_data))
 
-    # 2. Background task chalao taaki API turant response de sake (O(N) efficiency)
-    # background_tasks.add_task(run_collision_check) 
+    return {"status": "ACK", "processed_count": len(data.objects)}
 
-    return {
-        "status": "ACK",
-        "processed_count": len(data.objects),
-        "active_cdm_warnings": 0 # Abhi ke liye 0
-    }
-
-import json
-import numpy as np
-from physics.rk4_integrator import rk4_step
-
-# API to advance simulation by dt seconds
 @app.post("/api/simulate/step")
 async def simulate_step(dt: float = 1.0):
-    # 1. Redis se saari keys (Satellites aur Debris) uthao
-    keys = r.keys("SATELLITE:*") + r.keys("DEBRIS:*")
+    # 1. Take all keys
+    all_keys = r.keys("SATELLITE:*") + r.keys("DEBRIS:*")
     
-    updated_count = 0
-    for key in keys:
-        # 2. Data fetch aur parse karo
-        obj_data = json.loads(r.get(key))
+    # 2. Update position of evry object (RK4)
+    for key in all_keys:
+        raw_data = r.get(key)
+        if not raw_data: continue
         
-        # Current state vector [x, y, z, vx, vy, vz]
+        obj_data = json.loads(raw_data)
+        
+        # Make Current state array
         current_state = np.array([
-            obj_data['x'], obj_data['y'], obj_data['z'],
-            obj_data['vx'], obj_data['vy'], obj_data['vz']
+            float(obj_data['x']), float(obj_data['y']), float(obj_data['z']),
+            float(obj_data['vx']), float(obj_data['vy']), float(obj_data['vz'])
         ])
         
-        # 3. RK4 Physics Engine chalao
+        # CAll RK4 step
         new_state = rk4_step(current_state, dt)
         
-        # 4. Data update karo
+        # Update dict
         obj_data.update({
             "x": new_state[0], "y": new_state[1], "z": new_state[2],
             "vx": new_state[3], "vy": new_state[4], "vz": new_state[5]
         })
         
-        # 5. Wapas Redis mein save karo
+        # Save back to Redis
         r.set(key, json.dumps(obj_data))
-        updated_count += 1
 
-    return {"status": "OK", "updated_objects": updated_count, "dt": dt}
+    # 3. Check conjuction after position update
+    sat_data = [json.loads(r.get(k)) for k in r.keys("SATELLITE:*")]
+    deb_data = [json.loads(r.get(k)) for k in r.keys("DEBRIS:*")]
+    
+    danger_zones = check_for_conjunctions(sat_data, deb_data)
+    
+    # Debug results to terminal
+    for danger in danger_zones:
+        d_val = danger['distance']
+        s_id = danger['sat_id']
+        b_id = danger['deb_id']
+        
+        if d_val < 0.1: # 100 meters
+            print(f"!!! CRITICAL COLLISION: {s_id} <-> {b_id} AT {d_val:.4f} km")
+        elif d_val < 5.0: # 5 km
+            print(f"WARNING: Close approach for {s_id} at {d_val:.4f} km")
+
+    return {
+        "status": "OK", 
+        "updated_objects": len(all_keys), 
+        "conjunctions_found": len(danger_zones),
+        "alerts": danger_zones
+    }
+
+from maneuver.maneuver_planner import apply_maneuver
+
+class ManeuverRequest(BaseModel):
+    sat_id: str
+    dv_rtn: List[float] # Example: [0.001, 0.005, 0.0] (km/s)
+
+@app.post("/api/maneuver/apply")
+async def schedule_maneuver(req: ManeuverRequest):
+    key = f"SATELLITE:{req.sat_id}"
+    raw_data = r.get(key)
+    
+    if not raw_data:
+        return {"error": "Satellite not found"}
+        
+    obj_data = json.loads(raw_data)
+    
+    # Fuel check
+    if obj_data['fuel'] <= 0:
+        return {"error": "Out of fuel!"}
+
+    # Current state
+    state = np.array([obj_data['x'], obj_data['y'], obj_data['z'], 
+                      obj_data['vx'], obj_data['vy'], obj_data['vz']])
+    
+    # Maneuver lagao
+    new_state = apply_maneuver(state, req.dv_rtn)
+    
+    # Update and deduct fuel (! unit fuel lost on every 1 m/s burn)
+    dv_mag = np.linalg.norm(req.dv_rtn)
+    obj_data.update({
+        "vx": new_state[3], "vy": new_state[4], "vz": new_state[5],
+        "fuel": obj_data['fuel'] - (dv_mag * 1000) # Simple fuel logic
+    })
+    
+    r.set(key, json.dumps(obj_data))
+    return {"status": "Maneuver Applied", "new_fuel": obj_data['fuel']}
 
 if __name__ == "__main__":
     import uvicorn
