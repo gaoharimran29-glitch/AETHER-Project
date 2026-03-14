@@ -8,32 +8,28 @@ def monte_carlo_collision_probability(
     collision_radius=0.01
 ):
     """
-    Monte Carlo collision probability simulation.
-
-    sigma → position uncertainty (km)
-    samples → number of random trials
-    collision_radius → collision threshold (km)
+    Vectorized Monte Carlo for high-speed collision risk assessment.
     """
+    # Vectorized sampling: Saare samples ek saath generate karo
+    # Shape will be (samples, 3)
+    sat_samples = sat_pos + np.random.normal(0, sigma, (samples, 3))
+    deb_samples = deb_pos + np.random.normal(0, sigma, (samples, 3))
 
-    collisions = 0
+    # Calculate distances for all samples at once
+    # Result is a 1D array of distances
+    distances = np.linalg.norm(sat_samples - deb_samples, axis=1)
 
-    for _ in range(samples):
-
-        sat_sample = sat_pos + np.random.normal(0, sigma, 3)
-        deb_sample = deb_pos + np.random.normal(0, sigma, 3)
-
-        dist = np.linalg.norm(sat_sample - deb_sample)
-
-        if dist < collision_radius:
-            collisions += 1
+    # Count hits
+    collisions = np.sum(distances < collision_radius)
 
     pc = collisions / samples
 
-    severity = "SAFE"
-
-    if pc > 0.1:
+    # Severity logic (PS compliant)
+    if pc > 0.05: # Threshold adjusted for better safety
         severity = "CRITICAL"
-    elif pc > 0.01:
+    elif pc > 0.001:
         severity = "WARNING"
+    else:
+        severity = "SAFE"
 
     return float(pc), severity

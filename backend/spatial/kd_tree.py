@@ -1,4 +1,4 @@
-from scipy.spatial import KDTree
+from scipy.spatial import ckdtree
 import numpy as np
 
 WARNING_RADIUS = 10.0      # km
@@ -22,11 +22,12 @@ def check_for_conjunctions(satellites_data, debris_data):
             dtype=float
         )
 
-        tree = KDTree(deb_coords)
+        tree = ckdtree(deb_coords , leaf_size=16)
 
         nearby_indices = tree.query_ball_point(
             sat_coords,
-            r=WARNING_RADIUS
+            r=WARNING_RADIUS,
+            workers=-1
         )
 
         conjunctions = []

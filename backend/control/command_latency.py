@@ -1,14 +1,13 @@
-LATENCY = 10  # seconds
+LATENCY = 10.0  # seconds
 
-
-def enforce_latency(current_time, burn_time):
+def enforce_latency(current_time, requested_burn_time):
     """
-    Burn cannot happen earlier than current_time + 10 sec
+    Ensures the burn is scheduled at least 10 seconds in the future
+    to account for uplink delay.
     """
-
-    min_time = current_time + LATENCY
-
-    if burn_time < min_time:
-        burn_time = min_time
-
-    return burn_time
+    min_allowed_time = current_time + LATENCY
+    
+    if requested_burn_time < min_allowed_time:
+        return min_allowed_time
+    
+    return requested_burn_time

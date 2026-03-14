@@ -20,29 +20,22 @@ RTN_DIRECTIONS = [
 
 
 def evaluate_maneuver(sat_state, deb_state, dv_rtn):
-
-    # apply maneuver
     new_state = apply_maneuver(sat_state, dv_rtn)
-
-    # recompute TCA
     dist, tca = find_tca(new_state, deb_state)
-
-    # compute risk
     pc, severity = calculate_risk(dist)
-
-    # fuel cost
     fuel_cost = np.linalg.norm(dv_rtn)
 
-    # scoring function
-    score = dist - (50 * fuel_cost)
+    # Scorig logic update:
+    # 1. Agar distance threshold se kam hai, toh heavy penalty lagao
+    # 2. Fuel efficiency tabhi dekho jab collision tal chuka ho
+    if dist < 1.0: # 1km safety margin
+        score = -1000 + dist 
+    else:
+        score = dist - (20 * fuel_cost) # Balanced score
 
     return {
-        "score": score,
-        "distance": dist,
-        "tca": tca,
-        "pc": pc,
-        "severity": severity,
-        "dv": dv_rtn
+        "score": score, "distance": dist, "tca": tca,
+        "pc": pc, "severity": severity, "dv": dv_rtn
     }
 
 

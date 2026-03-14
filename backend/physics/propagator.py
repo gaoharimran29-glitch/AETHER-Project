@@ -23,11 +23,14 @@ def get_j2_acceleration(state):
     r_mag = np.linalg.norm(r, axis=1).reshape(-1, 1)
     r_mag = np.maximum(r_mag, EPS)
 
+    r_mag3 = r_mag**3
+    r_mag5 = r_mag**5
+
     # Point mass gravity
-    a_grav = -MU * r / r_mag**3
+    a_grav = -MU * r / r_mag3
 
     # J2 perturbation
-    factor = 1.5 * J2 * MU * RE**2 / r_mag**5
+    factor = 1.5 * J2 * MU * RE**2 / r_mag5
 
     z2_r2 = (z**2) / r_mag**2
 

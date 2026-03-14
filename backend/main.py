@@ -5,10 +5,11 @@ from typing import List
 import redis
 import json
 import numpy as np
+import os
 import asyncio
 import logging
 from datetime import datetime
-
+from scheduler import event_queue
 from spatial.kd_tree import check_for_conjunctions
 from physics.rk4_integrator import rk4_step
 from maneuver.maneuver_planner import apply_maneuver
@@ -23,6 +24,9 @@ from control.cooldown_manager import can_burn
 from control.command_latency import enforce_latency
 from navigation.station_keeper import is_outside_box, recovery_delta_v
 import time
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ==============================
 # LOGGING
@@ -60,12 +64,15 @@ app.add_middleware(
 # ==============================
 # REDIS
 # ==============================
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+MAX_DV = float(os.getenv("MAX_DV", 0.015))
 
 r = redis.Redis(
-    host="localhost",
+    host=REDIS_HOST,
     port=6379,
     decode_responses=True
 )
+
 ALERT_COUNTER_KEY = "alert_stats"
 
 # ==============================
@@ -75,7 +82,7 @@ ALERT_COUNTER_KEY = "alert_stats"
 los_checker = LOSChecker("data/ground_stations.csv")
 
 SIMULATION_RUNNING = False
-
+SIMULATION_START_TIME = time.time()
 # ==============================
 # CONSTANTS
 # ==============================
@@ -127,7 +134,6 @@ def redis_scan(pattern):
 
 
 def try_return_to_nominal(sat_obj):
-
     if not sat_obj.get("needs_return"):
         return None
 
@@ -168,31 +174,29 @@ async def system_status():
 
 @app.post("/api/maneuver")
 async def manual_maneuver(req: ManeuverRequest):
+    try:
+        key = f"SATELLITE:{req.sat_id}"
+        raw = r.get(key)
+        if not raw: return {"error": "Satellite not found"}
+        
+        sat = json.loads(raw)
+        state = np.array([sat["x"], sat["y"], sat["z"], sat["vx"], sat["vy"], sat["vz"]])
 
-    key = f"SATELLITE:{req.sat_id}"
+        state_at_burn_time = rk4_step(state, 10.0) 
+        
+        new_state = apply_maneuver(state_at_burn_time, req.dv_rtn)
 
-    raw = r.get(key)
-
-    if not raw:
-        return {"error": "Satellite not found"}
-
-    sat = json.loads(raw)
-
-    state = np.array([
-        sat["x"], sat["y"], sat["z"],
-        sat["vx"], sat["vy"], sat["vz"]
-    ])
-
-    new_state = apply_maneuver(state, req.dv_rtn)
-
-    sat["vx"] = float(new_state[3])
-    sat["vy"] = float(new_state[4])
-    sat["vz"] = float(new_state[5])
-
-    r.set(key, json.dumps(sat))
-
-    return {"status": "maneuver_applied"}
-
+        sat.update({
+            "x": float(new_state[0]), "y": float(new_state[1]), "z": float(new_state[2]),
+            "vx": float(new_state[3]), "vy": float(new_state[4]), "vz": float(new_state[5]),
+            "last_maneuver": datetime.utcnow().isoformat()
+        })
+        r.set(key, json.dumps(sat))
+        return {"status": "maneuver_applied_with_10s_latency"}
+    except Exception as e:
+        logger.error(f"Manual maneuver failed: {e}")
+        return {"error": str(e)}
+    
 @app.post("/api/reset")
 async def reset_simulation():
 
@@ -214,6 +218,12 @@ async def system_metrics():
         "collisions_avoided": TOTAL_COLLISIONS_AVOIDED,
         "fuel_used_total": TOTAL_FUEL_USED
     }
+
+EVENT_QUEUE = []
+
+@app.get("/api/scheduler/queue")
+async def get_event_queue():
+    return EVENT_QUEUE
 
 # ==============================
 # TELEMETRY INGESTION
@@ -274,365 +284,173 @@ async def ingest_telemetry(data: TelemetryRequest):
 # ==============================
 # SIMULATION STEP
 # ==============================
+# Global variable initialization (main.py ke top level pe rakho)
+ELAPSED_SIM_TIME = 0.0
+
 @app.post("/api/simulate/step")
 async def simulate_step(dt: float = 1.0):
-
-    keys = redis_scan("SATELLITE:*") + redis_scan("DEBRIS:*")
-
-    updated = 0
-
-    # ==============================
-    # ORBIT PROPAGATION
-    # ==============================
-
-    for key in keys:
-
-        raw = r.get(key)
-        if not raw:
-            continue
-
-        obj = json.loads(raw)
-
-        if obj.get("status") == "GRAVEYARD":
-            continue
-
-        state = np.array([
-            obj["x"], obj["y"], obj["z"],
-            obj["vx"], obj["vy"], obj["vz"]
-        ], dtype=float)
-
-        new_state = rk4_step(state, dt)
-
-        obj.update({
-            "x": float(new_state[0]),
-            "y": float(new_state[1]),
-            "z": float(new_state[2]),
-            "vx": float(new_state[3]),
-            "vy": float(new_state[4]),
-            "vz": float(new_state[5]),
-            "last_update": datetime.utcnow().isoformat()
-        })
-
-        nominal = obj.get("nominal")
-
-        if nominal:
-
-            nominal_pos = np.array([
-            nominal["x"],
-            nominal["y"],
-            nominal["z"]
-            ])
-
-            if is_outside_box(new_state[:3], nominal_pos):
-
-                logger.warning(f"{obj['id']} drifted outside station box")
-
-                dv_correction = recovery_delta_v(new_state[:3], nominal_pos)
-
-                corrected_state = apply_maneuver(new_state, dv_correction)
-
-                obj["vx"] = float(corrected_state[3])
-                obj["vy"] = float(corrected_state[4])
-                obj["vz"] = float(corrected_state[5])
-
-        r.set(key, json.dumps(obj))
-        updated += 1
-
-
-    # ==============================
-    # CONJUNCTION DETECTION
-    # ==============================
-
-    sats = [json.loads(r.get(k)) for k in redis_scan("SATELLITE:*")]
-    debris = [json.loads(r.get(k)) for k in redis_scan("DEBRIS:*")]
-
-    dangers = check_for_conjunctions(sats, debris)
-
-
-    for d in dangers:
-
-        dist = d["distance"]
-        sat = d["sat_id"]
-        deb = d["deb_id"]
-
-        sat_key = f"SATELLITE:{sat}"
-        deb_key = f"DEBRIS:{deb}"
-
-        sat_raw = r.get(sat_key)
-        deb_raw = r.get(deb_key)
-
-        if not sat_raw or not deb_raw:
-            continue
-
-        sat_obj = json.loads(sat_raw)
-        deb_obj = json.loads(deb_raw)
-        sat_state = np.array([
-            sat_obj["x"], sat_obj["y"], sat_obj["z"],
-            sat_obj["vx"], sat_obj["vy"], sat_obj["vz"]
-        ])
-
-        deb_state = np.array([
-            deb_obj["x"], deb_obj["y"], deb_obj["z"],
-            deb_obj["vx"], deb_obj["vy"], deb_obj["vz"]
-        ])
-        fuel_percent = ( sat_obj["fuel"] / INITIAL_FUEL ) * 100
-
-        if fuel_percent < 5:
-
-            logger.warning(f"{sat} low fuel — sending to graveyard")
-
-            dv = [0.0, 0.0, 0.015]
-
-            new_state = apply_maneuver(sat_state, dv)
-
-            sat_obj["vx"] = float(new_state[3])
-            sat_obj["vy"] = float(new_state[4])
-            sat_obj["vz"] = float(new_state[5])
-
-            sat_obj["status"] = "GRAVEYARD"
-
-            r.set(sat_key, json.dumps(sat_obj))
-
-            continue
-
-        deb_obj = json.loads(deb_raw)
+    global ELAPSED_SIM_TIME, TOTAL_MANEUVERS, TOTAL_COLLISIONS_AVOIDED, TOTAL_FUEL_USED
+    
+    try:
+        keys = redis_scan("SATELLITE:*") + redis_scan("DEBRIS:*")
+        ELAPSED_SIM_TIME += dt
+        updated = 0
 
         # ==============================
-        # TCA PREDICTION
+        # 1. ORBIT PROPAGATION
         # ==============================
+        for key in keys:
+            try:
+                raw = r.get(key)
+                if not raw: continue
+                obj = json.loads(raw)
 
-        min_dist, tca_time = find_tca(
-            sat_state,
-            deb_state
-        )
+                if obj.get("status") == "GRAVEYARD": continue
 
-        logger.info(
-            f"TCA predicted in {tca_time:.1f}s "
-            f"min distance {min_dist:.4f} km"
-        )
+                state = np.array([
+                    obj["x"], obj["y"], obj["z"],
+                    obj["vx"], obj["vy"], obj["vz"]
+                ], dtype=float)
 
-        sat_pos = sat_state[:3]
-        deb_pos = deb_state[:3]
+                # Standard propagation for this time step
+                new_state = rk4_step(state, dt)
 
+                obj.update({
+                    "x": float(new_state[0]), "y": float(new_state[1]), "z": float(new_state[2]),
+                    "vx": float(new_state[3]), "vy": float(new_state[4]), "vz": float(new_state[5]),
+                    "last_update": datetime.utcnow().isoformat()
+                })
+
+                # Station Keeping Logic
+                nominal = obj.get("nominal")
+                if nominal:
+                    nominal_pos = np.array([nominal["x"], nominal["y"], nominal["z"]])
+                    if is_outside_box(new_state[:3], nominal_pos):
+                        if can_burn(obj):
+                            dv_correction = recovery_delta_v(new_state[:3], nominal_pos)
+                            dv_mag = np.linalg.norm(dv_correction)
+                            
+                            # Rule: Latency delay of 10s before applying station keeping burn
+                            state_at_burn = rk4_step(new_state, 10.0)
+                            corrected_state = apply_maneuver(state_at_burn, dv_correction)
+                            
+                            # Fuel update
+                            m_current = DRY_MASS + obj["fuel"]
+                            _, fuel_used = update_mass(m_current, dv_mag)
+                            
+                            obj.update({
+                                "vx": float(corrected_state[3]),
+                                "vy": float(corrected_state[4]),
+                                "vz": float(corrected_state[5]),
+                                "fuel": max(0, obj["fuel"] - fuel_used),
+                                "last_maneuver": datetime.utcnow().isoformat()
+                            })
+                            logger.info(f"Station keeping burn for {obj['id']}")
+
+                r.set(key, json.dumps(obj))
+                updated += 1
+            except Exception as e:
+                logger.error(f"Error propagating {key}: {e}")
 
         # ==============================
-        # FAST RISK MODEL
+        # 2. CONJUNCTION DETECTION
         # ==============================
+        sats = [json.loads(r.get(k)) for k in redis_scan("SATELLITE:*")]
+        debris = [json.loads(r.get(k)) for k in redis_scan("DEBRIS:*")]
+        
+        dangers = check_for_conjunctions(sats, debris)
 
-        pc_fast, severity = calculate_risk(min_dist)
+        for d in dangers:
+            sat_id, deb_id, dist = d["sat_id"], d["deb_id"], d["distance"]
+            sat_key, deb_key = f"SATELLITE:{sat_id}", f"DEBRIS:{deb_id}"
+            
+            sat_raw, deb_raw = r.get(sat_key), r.get(deb_key)
+            if not sat_raw or not deb_raw: continue
 
-        # ==============================
-        # MONTE CARLO (ONLY IF NEEDED)
-        # ==============================
+            sat_obj, deb_obj = json.loads(sat_raw), json.loads(deb_raw)
+            sat_state = np.array([sat_obj["x"], sat_obj["y"], sat_obj["z"], sat_obj["vx"], sat_obj["vy"], sat_obj["vz"]])
+            deb_state = np.array([deb_obj["x"], deb_obj["y"], deb_obj["z"], deb_obj["vx"], deb_obj["vy"], deb_obj["vz"]])
 
-        pc_mc = pc_fast
+            # TCA & Risk Analysis
+            min_dist, tca_time = find_tca(sat_state, deb_state)
+            pc_fast, severity = calculate_risk(min_dist)
+            
+            pc_final = pc_fast
+            if severity != "SAFE":
+                pc_final, severity = monte_carlo_collision_probability(sat_state[:3], deb_state[:3])
 
-        if severity != "SAFE":
+            # Alert Stats & Logging
+            cdm = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "sat_id": sat_id, "deb_id": deb_id,
+                "tca_distance": float(min_dist), "probability": float(pc_final), "severity": severity
+            }
+            r.lpush("cdm_history", json.dumps(cdm))
+            r.hincrby(ALERT_COUNTER_KEY, severity, 1)
 
-            pc_mc, severity = monte_carlo_collision_probability(
-                sat_pos,
-                deb_pos
-            )
-
-            logger.info(f"Monte Carlo Pc={pc_mc:.6f}")
-
-
-        # ==============================
-        # STORE CDM
-        # ==============================
-
-        cdm = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "sat_id": sat,
-            "deb_id": deb,
-            "current_distance": float(dist),
-            "tca_distance": float(min_dist),
-            "tca_time": float(tca_time),
-            "probability": float(pc_mc if severity != "SAFE" else pc_fast),
-            "severity": severity
-        }
-
-
-        r.lpush("cdm_history", json.dumps(cdm))
-        r.hincrby(ALERT_COUNTER_KEY, severity, 1)
-        r.ltrim("cdm_history", 0, 100)
-
-
-        msg = f"CONJUNCTION [{severity}] {sat} <-> {deb} @ {dist:.4f} km"
-
-        if severity == "CRITICAL":
-
-            logger.error(msg)
-
-            # ==============================
-            # CHECK LOS
-            # ==============================
-
-            visible_stations = los_checker.check_los(sat_pos, elevation_mask=10)
-
-            if len(visible_stations) == 0:
-
-                logger.warning(f"{sat} has NO ground contact")
-
-                try:
-
-                    gs_pos = los_checker.stations[0]["pos"]
-
-                    next_pass = estimate_next_pass(
-                        sat_pos,
-                        gs_pos
-                    )
-
-                    logger.info(f"Next ground pass in {next_pass:.1f}s")
-
-                except Exception as e:
-
-                    logger.warning(f"Pass prediction failed {e}")
-                    next_pass = None
-
-
-                if next_pass and next_pass < 900:
-
-                    logger.info("Waiting for ground contact")
-
-                else:
-
-                    logger.warning("Emergency autonomous maneuver")
-
-                    best = find_best_maneuver(sat_state)
-
-                    if best and can_burn(sat_obj):
-
-                        dv = best["dv"]
-
-                        dv_mag = np.linalg.norm(dv)
-
-                        if dv_mag > MAX_DV:
-                            logger.warning(f"{sat} maneuver rejected: dv too large {dv_mag}")
-                            continue
-
-                        m_current = DRY_MASS + sat_obj["fuel"]
-
-                        new_mass, fuel_used = update_mass(m_current, dv_mag)
-
-                        sat_obj["fuel"] = max(0, sat_obj["fuel"] - fuel_used)
-
-                        burn_time = enforce_latency(time.time(), time.time())
-
-                        new_state = apply_maneuver(
-                            sat_state,
-                            dv
-                        )
-
-                        sat_obj["vx"] = float(new_state[3])
-                        sat_obj["vy"] = float(new_state[4])
-                        sat_obj["vz"] = float(new_state[5])
-
-                        sat_obj["needs_return"] = True
-                        sat_obj["last_maneuver"] = datetime.utcnow().isoformat()
-
-                        r.set(sat_key, json.dumps(sat_obj))
-
-                        logger.info(f"Maneuver executed for {sat} dv={dv_mag:.4f} fuel_left={sat_obj['fuel']:.3f}")
-
-                    else:
-                        logger.warning(f"{sat} burn skipped due to cooldown")
-
-            else:
-
-                logger.info(f"{sat} visible from {visible_stations}")
+            # --- CRITICAL MANEUVER EXECUTION ---
+            if severity == "CRITICAL":
+                # Check Ground Station LOS (Rule 5.4)
+                visible_stations = los_checker.check_los(sat_state[:3], elevation_mask=10, sim_time_sec=ELAPSED_SIM_TIME)
+                
+                if not visible_stations:
+                    logger.warning(f"CRITICAL: {sat_id} NO LOS. Command deferred.")
+                    continue
 
                 best = find_best_maneuver(sat_state)
-
                 if best and can_burn(sat_obj):
-
                     dv = best["dv"]
-
                     dv_mag = np.linalg.norm(dv)
+                    if dv_mag > MAX_DV: continue
 
-                    if dv_mag > MAX_DV:
-                        logger.warning(f"{sat} maneuver rejected: dv too large {dv_mag}")
-                        continue
+                    # Latency: Propagate 10s into future before applying burn
+                    future_state = rk4_step(sat_state, 10.0)
+                    new_state = apply_maneuver(future_state, dv)
 
                     m_current = DRY_MASS + sat_obj["fuel"]
+                    _, fuel_used = update_mass(m_current, dv_mag)
 
-                    new_mass, fuel_used = update_mass(m_current, dv_mag)
-
-                    sat_obj["fuel"] = max(0, sat_obj["fuel"] - fuel_used)
-
-                    burn_time = enforce_latency(time.time(), time.time())
-
-                    new_state = apply_maneuver(
-                        sat_state,
-                        dv
-                    )
-
-                    sat_obj["vx"] = float(new_state[3])
-                    sat_obj["vy"] = float(new_state[4])
-                    sat_obj["vz"] = float(new_state[5])
-
-                    sat_obj["needs_return"] = True
-                    sat_obj["last_maneuver"] = datetime.utcnow().isoformat()
-
-                    r.set(sat_key, json.dumps(sat_obj))
-
-                    logger.info(f"Maneuver executed for {sat}")
-
-                    global TOTAL_MANEUVERS, TOTAL_COLLISIONS_AVOIDED, TOTAL_FUEL_USED
-
+                    sat_obj.update({
+                        "vx": float(new_state[3]), "vy": float(new_state[4]), "vz": float(new_state[5]),
+                        "fuel": max(0, sat_obj["fuel"] - fuel_used),
+                        "needs_return": True,
+                        "last_maneuver": datetime.utcnow().isoformat()
+                    })
+                    
                     TOTAL_MANEUVERS += 1
                     TOTAL_COLLISIONS_AVOIDED += 1
                     TOTAL_FUEL_USED += fuel_used
+                    r.set(sat_key, json.dumps(sat_obj))
+                    logger.info(f"SUCCESS: Avoidance Maneuver for {sat_id}")
 
-                else:
-                    logger.warning(f"{sat} burn skipped due to cooldown")
+        # ==============================
+        # 3. RETURN TO NOMINAL & EVENTS
+        # ==============================
+        pending_events = event_queue.get_pending_events(ELAPSED_SIM_TIME)
+        for ts, ev_type, data in pending_events:
+            logger.info(f"Executing scheduled event: {ev_type}")
 
-        elif severity == "WARNING":
+        for key in redis_scan("SATELLITE:*"):
+            raw = r.get(key)
+            if not raw: continue
+            sat_obj = json.loads(raw)
+            dv = try_return_to_nominal(sat_obj)
+            if dv:
+                state = np.array([sat_obj["x"], sat_obj["y"], sat_obj["z"], sat_obj["vx"], sat_obj["vy"], sat_obj["vz"]])
+                # Latency delay for nominal return
+                state_at_burn = rk4_step(state, 10.0)
+                new_state = apply_maneuver(state_at_burn, dv)
+                sat_obj.update({
+                    "vx": float(new_state[3]), "vy": float(new_state[4]), "vz": float(new_state[5]),
+                    "needs_return": False
+                })
+                r.set(key, json.dumps(sat_obj))
 
-            logger.warning(msg)
+        return {"status": "STEP_COMPLETE", "updated_objects": updated, "sim_time": ELAPSED_SIM_TIME}
 
-        else:
-
-            logger.info(msg)
-
-    # ==============================
-    # RETURN TO NOMINAL ORBIT
-    # ==============================
-
-    for key in redis_scan("SATELLITE:*"):
-
-        raw = r.get(key)
-        if not raw:
-            continue
-
-        sat_obj = json.loads(raw)
-
-        dv = try_return_to_nominal(sat_obj)
-
-        if dv:
-
-            state = np.array([
-                sat_obj["x"], sat_obj["y"], sat_obj["z"],
-                sat_obj["vx"], sat_obj["vy"], sat_obj["vz"]
-            ])
-
-            new_state = apply_maneuver(state, dv)
-
-            sat_obj["vx"] = float(new_state[3])
-            sat_obj["vy"] = float(new_state[4])
-            sat_obj["vz"] = float(new_state[5])
-
-            sat_obj["needs_return"] = False
-
-            r.set(key, json.dumps(sat_obj))
-
-            logger.info(f"{sat_obj['id']} returned to nominal orbit")
-
-    return {
-        "status": "STEP_COMPLETE",
-        "updated_objects": updated,
-        "conjunctions_found": len(dangers)
-    }
+    except Exception as e:
+        logger.critical(f"Simulation step failed: {e}")
+        return {"status": "ERROR", "message": str(e)}
 
 # ==============================
 # SIMULATION LOOP
