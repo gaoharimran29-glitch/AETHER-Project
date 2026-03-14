@@ -1,19 +1,18 @@
 import numpy as np
 from .propagator import state_derivative
 
+
 def rk4_step(state, dt):
-    """
-    Moves the state forward by time dt using RK4.
-    state: [x, y, z, vx, vy, vz]
-    """
-    # Convert input to numpy array just in case it's a list
-    state = np.array(state)
-    
+
+    state = np.asarray(state, dtype=float)
+
     k1 = state_derivative(state)
-    k2 = state_derivative(state + k1 * dt / 2.0)
-    k3 = state_derivative(state + k2 * dt / 2.0)
-    k4 = state_derivative(state + k3 * dt)
-    
-    new_state = state + (dt / 6.0) * (k1 + 2.0*k2 + 2.0*k3 + k4)
-    
+    k2 = state_derivative(state + 0.5 * dt * k1)
+    k3 = state_derivative(state + 0.5 * dt * k2)
+    k4 = state_derivative(state + dt * k3)
+
+    new_state = state + (dt / 6.0) * (
+        k1 + 2*k2 + 2*k3 + k4
+    )
+
     return new_state
