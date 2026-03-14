@@ -3,35 +3,37 @@ import numpy as np
 TOLERANCE_KM = 10.0  # From Hackathon Rules
 
 def is_outside_box(current_pos, nominal_pos):
-    """
-    Checks if satellite is outside the allowed 10km radius.
-    """
     dist = np.linalg.norm(np.array(current_pos) - np.array(nominal_pos))
     return dist > TOLERANCE_KM
 
-def recovery_delta_v(current_state, nominal_state):
+def recovery_delta_v(current_state, nominal_pos):
     """
-    Calculates a small burn to push the satellite back to its slot.
+    current_state: full state [x, y, z, vx, vy, vz]
+    nominal_pos: target position [x, y, z]
     """
-    pos = np.array(current_state[:3])
-    nom_pos = np.array(nominal_state[:3])
+    # Ensure numpy arrays
+    current_state = np.array(current_state)
+    pos = current_state[:3]
     
-    # Vector pointing from current position to nominal slot
-    error_vec = nom_pos - pos
+    # Target direction vector
+    error_vec = np.array(nominal_pos) - pos
     distance = np.linalg.norm(error_vec)
     
-    if distance < 0.5: # Already very close
+    if distance < 0.5: 
         return [0.0, 0.0, 0.0]
     
-    # Small corrective burn: don't overcorrect!
-    # 1 m/s burn (0.001 km/s) is usually enough for station keeping
     burn_mag = 0.001 
     direction = error_vec / distance
     
-    # Return as [dv_radial, dv_tangential, dv_normal]
-    # Simplified: We use the direction vector to get ECI components
-    dv_eci = direction * burn_mag
-    
-    # To maintain consistency with apply_maneuver, we'll convert to a small RTN burn
-    # Most station keeping is Tangential (Prograde/Retrograde)
-    return [0.0, burn_mag, 0.0] if np.dot(direction, current_state[3:6]) > 0 else [0.0, -burn_mag, 0.0]
+    # Velocity check (Avoiding the shape error)
+    if len(current_state) >= 6:
+        velocity_vec = current_state[3:6]
+        # Dot product with velocity to see if we need to push prograde or retrograde
+        is_prograde = np.dot(direction, velocity_vec) > 0
+        dv_tangential = burn_mag if is_prograde else -burn_mag
+    else:
+        # Fallback if velocity not found
+        dv_tangential = burn_mag
+
+    # Return as RTN burn [radial, tangential, normal]
+    return [0.0, float(dv_tangential), 0.0]

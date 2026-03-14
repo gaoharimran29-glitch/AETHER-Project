@@ -10,8 +10,7 @@ def monte_carlo_collision_probability(
     """
     Vectorized Monte Carlo for high-speed collision risk assessment.
     """
-    # Vectorized sampling: Saare samples ek saath generate karo
-    # Shape will be (samples, 3)
+    
     sat_samples = sat_pos + np.random.normal(0, sigma, (samples, 3))
     deb_samples = deb_pos + np.random.normal(0, sigma, (samples, 3))
 

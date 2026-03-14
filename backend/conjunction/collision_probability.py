@@ -10,9 +10,6 @@ def calculate_risk(distance_km):
     # Pc = exp(-d^2 / (2 * sigma^2)) 
     pc = np.exp(-(distance_km**2) / (2 * (SIGMA_KM**2)))
 
-    # Hackathon-Specific Severity Levels
-    # Critical threshold typically starts at 1e-4 in real space ops, 
-    # but for hackathons, we use tighter bounds.
     if distance_km < 0.1 or pc > 0.1:
         severity = "CRITICAL"
     elif distance_km < 0.5 or pc > 0.01:

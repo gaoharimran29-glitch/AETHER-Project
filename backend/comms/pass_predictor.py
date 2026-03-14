@@ -30,7 +30,7 @@ def estimate_next_pass(sat_pos, gs_pos, sat_vel):
     # 3. Determine if Approaching or Receding
     # Relative velocity vector direction check
     rel_pos = sat_pos - gs_pos
-    # Agar radial velocity negative hai, toh satellite pass aa raha hai
+    # If a radial velocity is negative that means satellite is coming closer
     is_approaching = np.dot(rel_pos, sat_vel) < 0
 
     if is_approaching:
@@ -38,10 +38,9 @@ def estimate_next_pass(sat_pos, gs_pos, sat_vel):
         # Simplified: Fraction of orbit
         time_to_pass = (angle_sep / (2 * np.pi)) * orbital_period
     else:
-        # Agar recede kar raha hai, toh agli orbit ka wait karna hoga
+        # If receeding , then wait for next orbit
         # Remaining orbit + distance to GS
         time_to_pass = ((2 * np.pi - angle_sep) / (2 * np.pi)) * orbital_period
 
     # 4. Buffering
-    # Hackathon rules ke liye thoda safety margin (10s latency handle karne ke liye)
     return max(0.0, time_to_pass - 10.0)
