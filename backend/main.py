@@ -108,6 +108,7 @@ class SpaceObject(BaseModel):
     type: str
     r: Vector3
     v: Vector3
+    fuel: float = 50.0 
 
 class TelemetryRequest(BaseModel):
     timestamp: str
@@ -133,6 +134,32 @@ def redis_scan(pattern):
 
     return keys
 
+R_EARTH = 6378.137
+
+def lat_long_to_eci(lat, lon, alt):
+    lat_rad = np.radians(lat)
+    lon_rad = np.radians(lon)
+    x = (R_EARTH + (alt / 1000.0)) * np.cos(lat_rad) * np.cos(lon_rad)
+    y = (R_EARTH + (alt / 1000.0)) * np.cos(lat_rad) * np.sin(lon_rad)
+    z = (R_EARTH + (alt / 1000.0)) * np.sin(lat_rad)
+    return x, y, z
+
+def retire_to_graveyard(sat_obj):
+    graveyard_dv = [0.1, 0.05, 0.0] 
+    
+    state = np.array([float(sat_obj[k]) for k in ['x','y','z','vx','vy','vz']])
+    state_at_burn = rk4_step(state, 10.0)
+    retired_state = apply_maneuver(state_at_burn, graveyard_dv)
+    
+    sat_obj.update({
+        "vx": float(retired_state[3]), 
+        "vy": float(retired_state[4]), 
+        "vz": float(retired_state[5]),
+        "status": "GRAVEYARD",
+        "fuel": 0.0, # Final burn exhausts remaining fuel
+        "needs_return": False
+    })
+    print(f"!!! RETIREMENT: {sat_obj['id']} reached 5% threshold. Moving to GRAVEYARD orbit.")
 
 def try_return_to_nominal(sat_obj):
     if not sat_obj.get("needs_return"):
@@ -181,18 +208,31 @@ async def manual_maneuver(req: ManeuverRequest):
         if not raw: return {"error": "Satellite not found"}
         
         sat = json.loads(raw)
-        state = np.array([sat["x"], sat["y"], sat["z"], sat["vx"], sat["vy"], sat["vz"]])
+        
+        # YE LINE MISSING THI (State define karo)
+        state = np.array([
+            float(sat["x"]), float(sat["y"]), float(sat["z"]), 
+            float(sat["vx"]), float(sat["vy"]), float(sat["vz"])
+        ])
 
+        # PS ki Demand: 10s Latency ka log print karo
+        print(f"!!! MANUAL COMMAND RECEIVED for {req.sat_id}")
+        print(f"ENFORCING HARDCODED 10-SECOND LATENCY. Executing at T+10s...")
+
+        # Physics jump for 10 seconds delay
         state_at_burn_time = rk4_step(state, 10.0) 
         
+        # Apply the maneuver
         new_state = apply_maneuver(state_at_burn_time, req.dv_rtn)
 
+        # Update back to Redis
         sat.update({
             "x": float(new_state[0]), "y": float(new_state[1]), "z": float(new_state[2]),
             "vx": float(new_state[3]), "vy": float(new_state[4]), "vz": float(new_state[5]),
             "last_maneuver": datetime.utcnow().isoformat()
         })
         r.set(key, json.dumps(sat))
+        
         return {"status": "maneuver_applied_with_10s_latency"}
     except Exception as e:
         logger.error(f"Manual maneuver failed: {e}")
@@ -232,54 +272,25 @@ async def get_event_queue():
 
 @app.post("/api/telemetry")
 async def ingest_telemetry(data: TelemetryRequest):
-
     processed = 0
-
     for obj in data.objects:
-
         key = f"{obj.type}:{obj.id}"
+        
+        # Pydantic model se fuel nikal (Isse use karo!)
+        # Note: SpaceObject model mein fuel field add karni hogi (Niche dekho)
+        incoming_fuel = getattr(obj, 'fuel', INITIAL_FUEL) 
 
-        existing = r.get(key)
-
-        fuel_value = INITIAL_FUEL
-
-        if existing:
-            fuel_value = json.loads(existing)["fuel"]
-
-        if not existing:
-            obj_data = {
-                "id": obj.id,
-                "type": obj.type,
-                "x": obj.r.x,
-                "y": obj.r.y,
-                "z": obj.r.z,
-                "vx": obj.v.x,
-                "vy": obj.v.y,
-                "vz": obj.v.z,
-                "fuel": fuel_value,
-                "last_update": data.timestamp,
-
-                # NEW FIELDS
-                "nominal": {
-                    "x": obj.r.x,
-                    "y": obj.r.y,
-                    "z": obj.r.z,
-                    "vx": obj.v.x,
-                    "vy": obj.v.y,
-                    "vz": obj.v.z
-                },
-                "needs_return": False,
-                "last_maneuver": None,
-                "status": "ACTIVE"
-            }
-        else:
-            obj_data = json.loads(existing)
-
+        obj_data = {
+            "id": obj.id,
+            "type": obj.type,
+            "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
+            "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
+            "fuel": incoming_fuel, # Hamesha naya fuel lo!
+            "status": "ACTIVE",
+            "nominal": {"x": obj.r.x, "y": obj.r.y, "z": obj.r.z}
+        }
         r.set(key, json.dumps(obj_data))
         processed += 1
-
-    logger.info(f"Telemetry Ingested: {processed} objects")
-
     return {"status": "ACK", "processed_count": processed}
 
 # ==============================
@@ -312,22 +323,40 @@ async def simulate_step(dt: float = 1.0):
             })
             
             if "SATELLITE" in key:
+                fuel_percent = (obj.get("fuel", 0) / INITIAL_FUEL) * 100
                 nominal = obj.get("nominal")
+
+                if fuel_percent <= 5.0 and obj.get("status") != "GRAVEYARD":
+                    retire_to_graveyard(obj)
+                    r.set(key, json.dumps(obj))
+                    updated += 1
+                    continue
+                
+                if obj.get("status") == "GRAVEYARD":
+                    r.set(key, json.dumps(obj))
+                    continue
+                
                 if nominal and is_outside_box(new_state[:3], np.array([nominal['x'], nominal['y'], nominal['z']])):
-                    print(f"STATION_KEEPING: {obj['id']} drifting from slot. Correcting...")
-                    if can_burn(obj, ELAPSED_SIM_TIME):
-                        dv_corr = recovery_delta_v(new_state, np.array([nominal['x'], nominal['y'], nominal['z']]))
-                        state_at_burn = rk4_step(new_state, 10.0) # Latency
-                        corrected = apply_maneuver(state_at_burn, dv_corr)
-                        
-                        m_curr = DRY_MASS + obj.get("fuel", 0)
-                        _, fuel_used = update_mass(m_curr, np.linalg.norm(dv_corr))
-                        
-                        obj.update({
-                            "vx": float(corrected[3]), "vy": float(corrected[4]), "vz": float(corrected[5]),
-                            "fuel": max(0, obj.get("fuel", 0) - fuel_used),
-                            "last_maneuver": datetime.utcnow().isoformat()
-                        })
+                    if obj.get("fuel", 0) <= 0:
+                        obj["status"] = "GRAVEYARD"
+                        print(f"!!! CRITICAL: {obj['id']} has NO FUEL for Station Keeping. Status: GRAVEYARD")
+                    else:
+                        if can_burn(obj, ELAPSED_SIM_TIME):
+                            print(f"STATION_KEEPING: {obj['id']} drifting from slot. Correcting...")
+                            print(f"!!! LATENCY ENFORCED: Station Keeping command for {obj['id']} delayed by 10.0s")
+                            dv_corr = recovery_delta_v(new_state, np.array([nominal['x'], nominal['y'], nominal['z']]))
+                            state_at_burn = rk4_step(new_state, 10.0) # Latency
+                            corrected = apply_maneuver(state_at_burn, dv_corr)
+                            
+                            m_curr = DRY_MASS + obj.get("fuel", 0)
+                            _, fuel_used = update_mass(m_curr, np.linalg.norm(dv_corr))
+                            
+                            obj.update({
+                                "vx": float(corrected[3]), "vy": float(corrected[4]), "vz": float(corrected[5]),
+                                "fuel": max(0, obj.get("fuel", 0) - fuel_used),
+                                "last_maneuver": datetime.utcnow().isoformat()
+                            })
+                            print(f"SUCCESS: SK Maneuver executed for {obj['id']} (10s latency accounted)")
 
             r.set(key, json.dumps(obj))
             updated += 1
@@ -365,8 +394,8 @@ async def simulate_step(dt: float = 1.0):
                 # 4. Maneuver Decision (CRITICAL or WARNING)
                 if severity in ["CRITICAL", "WARNING"]:
                     
-                    prob = monte_carlo_collision_probability(s_st, d_st)
-                    print(f"DEBUG: Monte Carlo Probability: {prob:.4f}")
+                    prob , risk_level = monte_carlo_collision_probability(s_st[:3], d_st[:3])
+                    print(f"DEBUG: Monte Carlo Probability: {prob:.4f} | Risk: {risk_level}")
                     if prob > 0.001:  # 0.1% probability threshold
                         # 2. Enforce Command Latency
                         requested_time = ELAPSED_SIM_TIME 
@@ -496,17 +525,24 @@ async def get_next_pass(sat_id: str):
     if not raw: return {"error": "Not found"}
     
     sat = json.loads(raw)
-    sat_state = np.array([sat['x'], sat['y'], sat['z']])
+    sat_pos = np.array([sat['x'], sat['y'], sat['z']])
     sat_vel = np.array([sat['vx'], sat['vy'], sat['vz']])
     
-    stations = los_checker.stations 
+    stations = los_checker.stations
     
     predictions = []
     for st in stations:
-        gs_pos = np.array([float(st['x']), float(st['y']), float(st['z'])])
-        pass_time = estimate_next_pass(sat_state, gs_pos, sat_vel)
+        lat = float(st['Latitude'])
+        lon = float(st['Longitude'])
+        alt = float(st['Elevation_m'])
+        
+        gx, gy, gz = lat_long_to_eci(lat, lon, alt)
+        gs_pos = np.array([gx, gy, gz])
+        
+        pass_time = estimate_next_pass(sat_pos, gs_pos, sat_vel)
+        
         predictions.append({
-            "station": st['name'],
+            "station": st['Station_Name'],
             "estimated_wait_seconds": round(pass_time, 2)
         })
     
