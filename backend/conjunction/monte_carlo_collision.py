@@ -1,30 +1,37 @@
 import numpy as np
 
+
 def monte_carlo_collision_probability(
     sat_pos,
     deb_pos,
     sigma=0.05,
     samples=5000,
-    collision_radius=0.01
+    collision_radius=0.1,    # km = 100 m  (PS §3.3)
 ):
     """
-    Vectorized Monte Carlo for high-speed collision risk assessment.
+    Vectorised Monte Carlo collision probability estimate.
+
+    Parameters
+    ----------
+    sat_pos          : array-like (3,)  ECI position of satellite (km)
+    deb_pos          : array-like (3,)  ECI position of debris (km)
+    sigma            : float  1-sigma position uncertainty (km), default 50 m
+    samples          : int    number of Monte Carlo samples
+    collision_radius : float  hard-body radius threshold (km)  — PS §3.3: 0.1 km
+
+    Returns
+    -------
+    (pc, severity) : (float, str)
     """
-    
-    sat_samples = sat_pos + np.random.normal(0, sigma, (samples, 3))
-    deb_samples = deb_pos + np.random.normal(0, sigma, (samples, 3))
+    sat_samples = np.asarray(sat_pos) + np.random.normal(0, sigma, (samples, 3))
+    deb_samples = np.asarray(deb_pos) + np.random.normal(0, sigma, (samples, 3))
 
-    # Calculate distances for all samples at once
-    # Result is a 1D array of distances
-    distances = np.linalg.norm(sat_samples - deb_samples, axis=1)
+    distances  = np.linalg.norm(sat_samples - deb_samples, axis=1)
+    collisions = int(np.sum(distances < collision_radius))
+    pc         = collisions / samples
 
-    # Count hits
-    collisions = np.sum(distances < collision_radius)
-
-    pc = collisions / samples
-
-    # Severity logic (PS compliant)
-    if pc > 0.05: # Threshold adjusted for better safety
+    # Severity thresholds
+    if pc > 0.05:
         severity = "CRITICAL"
     elif pc > 0.001:
         severity = "WARNING"

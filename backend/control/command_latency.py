@@ -1,13 +1,19 @@
-LATENCY = 10.0  # seconds
+LATENCY = 10.0   # seconds  (PS §5.4 — hardcoded signal delay)
 
-def enforce_latency(current_time, requested_burn_time):
+
+def enforce_latency(current_sim_time: float,
+                    requested_burn_time: float) -> float:
     """
-    Ensures the burn is scheduled at least 10 seconds in the future
-    to account for uplink delay.
+    Ensures a burn is never scheduled earlier than current_sim_time + LATENCY.
+
+    Parameters
+    ----------
+    current_sim_time     : float  ELAPSED_SIM_TIME at scheduling moment
+    requested_burn_time  : float  desired burn time (same sim-time units)
+
+    Returns
+    -------
+    float  — the earliest legal burn time (>= current + LATENCY)
     """
-    min_allowed_time = current_time + LATENCY
-    
-    if requested_burn_time < min_allowed_time:
-        return min_allowed_time
-    
-    return requested_burn_time
+    min_allowed = current_sim_time + LATENCY
+    return max(requested_burn_time, min_allowed)

@@ -1,57 +1,64 @@
-from scipy.spatial import cKDTree
+import logging
 import numpy as np
+from scipy.spatial import cKDTree
 
-WARNING_RADIUS = 50.0      # km
-COLLISION_RADIUS = 0.1     # km (100 meters)
+logger = logging.getLogger("AETHER.kd_tree")
+
+WARNING_RADIUS   = 50.0   # km  — broad first-pass filter
+COLLISION_RADIUS = 0.1    # km  = 100 m  (PS §3.3)
+
 
 def check_for_conjunctions(satellites_data, debris_data):
+    """
+    Efficient O(N log M) sat–threat conjunction check using a KD-tree.
+    Returns a list of dicts: { sat_id, deb_id, distance, collision_risk }
+    """
     if not satellites_data or not debris_data:
         return []
 
     try:
-        print(f"DEBUG DATA: Sat 1 -> {satellites_data[0]}")
-        sat_coords = np.array([
-            [float(s.get('x', 0)), float(s.get('y', 0)), float(s.get('z', 0))] 
-            for s in satellites_data
-        ], dtype=float)
+        sat_coords = np.array(
+            [[float(s.get("x", 0)), float(s.get("y", 0)), float(s.get("z", 0))]
+             for s in satellites_data],
+            dtype=float,
+        )
+        deb_coords = np.array(
+            [[float(d.get("x", 0)), float(d.get("y", 0)), float(d.get("z", 0))]
+             for d in debris_data],
+            dtype=float,
+        )
 
-        deb_coords = np.array([
-            [float(d.get('x', 0)), float(d.get('y', 0)), float(d.get('z', 0))] 
-            for d in debris_data
-        ], dtype=float)
-        print(f"DEBUG DISTANCE: Sat at ({sat_coords[0][0]:.2f}, {sat_coords[0][1]:.2f})")
-        print(f"DEBUG DISTANCE: Deb at ({deb_coords[0][0]:.2f}, {deb_coords[0][1]:.2f})")
-
-        actual_dist = np.linalg.norm(sat_coords[0] - deb_coords[0])
-        print(f"DEBUG DISTANCE: Actual distance is {actual_dist:.4f} km")
-        # Force check for empty arrays after conversion
         if sat_coords.size == 0 or deb_coords.size == 0:
             return []
 
-        tree = cKDTree(deb_coords, leafsize=16)
-        nearby_indices = tree.query_ball_point(sat_coords, r=WARNING_RADIUS, workers=-1)
+        logger.debug(
+            f"KD-tree check: {len(satellites_data)} sats vs "
+            f"{len(debris_data)} threats  (radius={WARNING_RADIUS} km)"
+        )
+
+        tree           = cKDTree(deb_coords, leafsize=16)
+        nearby_indices = tree.query_ball_point(
+            sat_coords, r=WARNING_RADIUS, workers=-1
+        )
 
         conjunctions = []
         for sat_idx, deb_list in enumerate(nearby_indices):
             if not deb_list:
                 continue
-
             sat_pos = sat_coords[sat_idx]
             for deb_idx in deb_list:
                 deb_pos = deb_coords[deb_idx]
-                dist = np.linalg.norm(sat_pos - deb_pos)
-
+                dist    = float(np.linalg.norm(sat_pos - deb_pos))
                 conjunctions.append({
-                    "sat_id": satellites_data[sat_idx]["id"],
-                    "deb_id": debris_data[deb_idx]["id"],
-                    "distance": float(dist), # Ensure key is 'distance' as main.py expects
-                    "collision_risk": dist <= COLLISION_RADIUS
+                    "sat_id":         satellites_data[sat_idx]["id"],
+                    "deb_id":         debris_data[deb_idx]["id"],
+                    "distance":       dist,
+                    "collision_risk": dist <= COLLISION_RADIUS,
                 })
 
+        logger.debug(f"KD-tree found {len(conjunctions)} conjunction(s)")
         return conjunctions
 
     except Exception as e:
-        print(f"Spatial Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Spatial check error: {e}", exc_info=True)
         return []

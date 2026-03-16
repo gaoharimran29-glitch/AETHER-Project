@@ -1,20 +1,26 @@
-from datetime import datetime
+COOLDOWN_TIME = 600.0   # seconds between burns  (PS §5.1)
 
-COOLDOWN_TIME = 600.0  # 10 minutes
 
-def can_burn(obj, current_time_numeric):
-    # 1. Check Fuel First
-    if obj.get("fuel", 0) <= 0:
+def can_burn(obj: dict, current_sim_time: float) -> bool:
+    """
+    Returns True if the satellite is allowed to fire its thruster.
+
+    Parameters
+    ----------
+    obj              : satellite dict from Redis
+    current_sim_time : float — current ELAPSED_SIM_TIME (simulation clock)
+
+    Checks
+    ------
+    1. Fuel > 0
+    2. At least COOLDOWN_TIME seconds have elapsed since last burn
+       (measured on the SIMULATION clock, not wall clock — critical for
+        fast-forward tick tests  PS §5.1)
+    """
+    # 1. Fuel check
+    if float(obj.get("fuel", 0.0)) <= 0.0:
         return False
-    
-    # 2. Check Cooldown Time
-    last_burn_str = obj.get("last_maneuver")
-    if not last_burn_str:
-        return True
 
-    try:
-        last_burn_dt = datetime.fromisoformat(last_burn_str)
-        last_burn_ts = last_burn_dt.timestamp()
-        return (current_time_numeric - last_burn_ts) >= COOLDOWN_TIME
-    except:
-        return True
+    # 2. Cooldown check on simulation clock
+    last_burn_sim = float(obj.get("last_burn_sim_time", -(COOLDOWN_TIME + 1.0)))
+    return (current_sim_time - last_burn_sim) >= COOLDOWN_TIME
