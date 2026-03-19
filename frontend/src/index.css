@@ -1,0 +1,829 @@
+/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   CUSTOM CSS VARIABLES
+   ========================================================================== */
+:root {
+  --color-space-black: #0a0c14;
+  --color-space-blue: #050510;
+  --color-aether-blue: #3b82f6;
+  --color-aether-purple: #8b5cf6;
+  --color-aether-green: #10b981;
+  --color-aether-red: #ef4444;
+  --color-aether-yellow: #f59e0b;
+  --color-aether-orange: #f97316;
+}
+
+/* ==========================================================================
+   BASE STYLES
+   ========================================================================== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  background-color: var(--color-space-black);
+  color: #ffffff;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+/* ==========================================================================
+   CUSTOM SCROLLBAR
+   ========================================================================== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1f2937;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4b5563;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}
+
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #4b5563 #1f2937;
+}
+
+/* ==========================================================================
+   ANIMATIONS
+   ========================================================================== */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes ping {
+  75%, 100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+@keyframes bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+@keyframes glow {
+  0%, 100% {
+    box-shadow: 0 0 5px rgba(59, 130, 246, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.8);
+  }
+}
+
+@keyframes radarPing {
+  0% {
+    transform: scale(0.5);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+@keyframes orbit {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Animation Classes */
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-ping {
+  animation: ping 1s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+.animate-bounce {
+  animation: bounce 1s infinite;
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+.animate-slideIn {
+  animation: slideIn 0.3s ease-out;
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.5s ease-in;
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-glow {
+  animation: glow 2s ease-in-out infinite;
+}
+
+.animate-radar {
+  position: relative;
+}
+
+.animate-radar::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.3);
+  transform: translate(-50%, -50%) scale(0.5);
+  animation: radarPing 2s ease-out infinite;
+}
+
+/* ==========================================================================
+   SPACE BACKGROUND
+   ========================================================================== */
+.space-bg {
+  background: linear-gradient(135deg, #050510 0%, #0a0c1a 50%, #050510 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.space-bg::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: radial-gradient(circle at 20% 30%, rgba(59, 130, 246, 0.1) 0%, transparent 50%),
+              radial-gradient(circle at 80% 70%, rgba(139, 92, 246, 0.1) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.stars {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: 
+    radial-gradient(2px 2px at 10px 10px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 20px 40px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 50px 80px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 100px 120px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 150px 60px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 200px 180px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 250px 90px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 300px 210px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 350px 150px, #ffffff, rgba(0,0,0,0)),
+    radial-gradient(2px 2px at 400px 270px, #ffffff, rgba(0,0,0,0));
+  background-repeat: repeat;
+  background-size: 400px 400px;
+  opacity: 0.5;
+  animation: starsMove 100s linear infinite;
+}
+
+@keyframes starsMove {
+  from {
+    transform: translateY(0);
+  }
+  to {
+    transform: translateY(-400px);
+  }
+}
+
+/* ==========================================================================
+   GLASS MORPHISM
+   ========================================================================== */
+.glass {
+  background: rgba(17, 25, 40, 0.75);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-light {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.glass-dark {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* ==========================================================================
+   CARD STYLES
+   ========================================================================== */
+.card {
+  @apply bg-gray-800 rounded-lg shadow-lg overflow-hidden;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px -10px rgba(59, 130, 246, 0.3);
+}
+
+.card-glow {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+}
+
+.card-border {
+  position: relative;
+  border: 1px solid transparent;
+  background-clip: padding-box;
+}
+
+.card-border::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  margin: -1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  z-index: -1;
+}
+
+/* ==========================================================================
+   BUTTON STYLES
+   ========================================================================== */
+.btn {
+  @apply px-4 py-2 rounded font-medium transition-all duration-200;
+}
+
+.btn-primary {
+  @apply bg-blue-600 hover:bg-blue-700 text-white;
+  box-shadow: 0 4px 14px 0 rgba(59, 130, 246, 0.4);
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px 0 rgba(59, 130, 246, 0.5);
+}
+
+.btn-secondary {
+  @apply bg-gray-700 hover:bg-gray-600 text-white;
+}
+
+.btn-danger {
+  @apply bg-red-600 hover:bg-red-700 text-white;
+}
+
+.btn-success {
+  @apply bg-green-600 hover:bg-green-700 text-white;
+}
+
+.btn-outline {
+  @apply border border-gray-600 hover:border-blue-500 hover:text-blue-400;
+}
+
+.btn-icon {
+  @apply p-2 rounded-full;
+}
+
+/* ==========================================================================
+   FORM ELEMENTS
+   ========================================================================== */
+.input {
+  @apply bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent;
+}
+
+.select {
+  @apply bg-gray-700 border border-gray-600 rounded px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-blue-500;
+}
+
+.checkbox {
+  @apply w-4 h-4 text-blue-600 bg-gray-700 border-gray-600 rounded focus:ring-blue-500;
+}
+
+.toggle {
+  @apply relative inline-flex items-center h-6 rounded-full w-11 bg-gray-700 border border-gray-600;
+}
+
+.toggle:checked {
+  @apply bg-blue-600;
+}
+
+/* ==========================================================================
+   STATUS INDICATORS
+   ========================================================================== */
+.status-dot {
+  @apply w-2 h-2 rounded-full inline-block;
+}
+
+.status-dot-green {
+  @apply bg-green-500 animate-pulse;
+}
+
+.status-dot-yellow {
+  @apply bg-yellow-500 animate-pulse;
+}
+
+.status-dot-red {
+  @apply bg-red-500 animate-pulse;
+}
+
+.status-dot-blue {
+  @apply bg-blue-500 animate-pulse;
+}
+
+.status-dot-gray {
+  @apply bg-gray-500;
+}
+
+.status-bar {
+  @apply h-1 rounded-full overflow-hidden bg-gray-700;
+}
+
+.status-bar-fill {
+  @apply h-full transition-all duration-300;
+}
+
+.status-bar-fill-green {
+  @apply bg-green-500;
+}
+
+.status-bar-fill-yellow {
+  @apply bg-yellow-500;
+}
+
+.status-bar-fill-red {
+  @apply bg-red-500;
+}
+
+/* ==========================================================================
+   LOADING SPINNERS
+   ========================================================================== */
+.spinner {
+  border: 3px solid rgba(59, 130, 246, 0.1);
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  animation: spin 1s linear infinite;
+}
+
+.spinner-sm {
+  width: 20px;
+  height: 20px;
+  border-width: 2px;
+}
+
+.spinner-lg {
+  width: 60px;
+  height: 60px;
+  border-width: 4px;
+}
+
+/* ==========================================================================
+   TOOLTIP
+   ========================================================================== */
+.tooltip {
+  @apply absolute bg-gray-900 text-white text-xs rounded py-1 px-2 pointer-events-none;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 50;
+}
+
+.tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -5px;
+  border-width: 5px;
+  border-style: solid;
+  border-color: #111827 transparent transparent transparent;
+}
+
+.has-tooltip:hover .tooltip {
+  opacity: 1;
+}
+
+/* ==========================================================================
+   TABLES
+   ========================================================================== */
+.table {
+  @apply w-full text-left;
+}
+
+.table th {
+  @apply text-gray-400 font-medium text-sm py-3 px-4 border-b border-gray-700;
+}
+
+.table td {
+  @apply py-3 px-4 border-b border-gray-700/50;
+}
+
+.table tbody tr:hover {
+  @apply bg-gray-700/30;
+}
+
+/* ==========================================================================
+   GRADIENTS
+   ========================================================================== */
+.gradient-text {
+  @apply bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400;
+}
+
+.gradient-border {
+  position: relative;
+  border: double 1px transparent;
+  border-radius: 0.5rem;
+  background-image: linear-gradient(#1f2937, #1f2937), 
+                    linear-gradient(to right, #3b82f6, #8b5cf6);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+}
+
+/* ==========================================================================
+   BADGES
+   ========================================================================== */
+.badge {
+  @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+}
+
+.badge-blue {
+  @apply bg-blue-900/30 text-blue-400 border border-blue-700;
+}
+
+.badge-green {
+  @apply bg-green-900/30 text-green-400 border border-green-700;
+}
+
+.badge-red {
+  @apply bg-red-900/30 text-red-400 border border-red-700;
+}
+
+.badge-yellow {
+  @apply bg-yellow-900/30 text-yellow-400 border border-yellow-700;
+}
+
+.badge-purple {
+  @apply bg-purple-900/30 text-purple-400 border border-purple-700;
+}
+
+/* ==========================================================================
+   PROGRESS BARS
+   ========================================================================== */
+.progress {
+  @apply w-full bg-gray-700 rounded-full h-2 overflow-hidden;
+}
+
+.progress-bar {
+  @apply h-full rounded-full transition-all duration-300;
+}
+
+.progress-bar-blue {
+  @apply bg-blue-500;
+}
+
+.progress-bar-green {
+  @apply bg-green-500;
+}
+
+.progress-bar-yellow {
+  @apply bg-yellow-500;
+}
+
+.progress-bar-red {
+  @apply bg-red-500;
+}
+
+/* ==========================================================================
+   ALERTS
+   ========================================================================== */
+.alert {
+  @apply p-4 rounded-lg border-l-4;
+}
+
+.alert-info {
+  @apply bg-blue-900/20 border-blue-500 text-blue-400;
+}
+
+.alert-success {
+  @apply bg-green-900/20 border-green-500 text-green-400;
+}
+
+.alert-warning {
+  @apply bg-yellow-900/20 border-yellow-500 text-yellow-400;
+}
+
+.alert-error {
+  @apply bg-red-900/20 border-red-500 text-red-400;
+}
+
+/* ==========================================================================
+   MODAL
+   ========================================================================== */
+.modal-overlay {
+  @apply fixed inset-0 bg-black/70 flex items-center justify-center z-50;
+  backdrop-filter: blur(5px);
+}
+
+.modal {
+  @apply bg-gray-800 rounded-lg shadow-xl max-w-lg w-full mx-4 overflow-hidden;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.modal-header {
+  @apply px-6 py-4 border-b border-gray-700;
+}
+
+.modal-body {
+  @apply px-6 py-4;
+}
+
+.modal-footer {
+  @apply px-6 py-4 border-t border-gray-700 flex justify-end space-x-3;
+}
+
+/* ==========================================================================
+   SATELLITE SPECIFIC STYLES
+   ========================================================================== */
+.satellite-marker {
+  @apply relative cursor-pointer;
+}
+
+.satellite-glow {
+  @apply absolute inset-0 rounded-full;
+  animation: glow 2s ease-in-out infinite;
+}
+
+.satellite-trail {
+  stroke-dasharray: 5 3;
+  animation: orbit 30s linear infinite;
+}
+
+/* ==========================================================================
+   GROUND STATION STYLES
+   ========================================================================== */
+.gs-marker {
+  @apply w-3 h-3 bg-blue-500 rounded-full relative cursor-pointer;
+}
+
+.gs-marker::after {
+  content: '';
+  @apply absolute inset-0 rounded-full bg-blue-500;
+  animation: ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* ==========================================================================
+   DEBRIS STYLES
+   ========================================================================== */
+.debris-particle {
+  @apply absolute rounded-full bg-red-500;
+  opacity: 0.6;
+  animation: float 3s ease-in-out infinite;
+}
+
+/* ==========================================================================
+   RESPONSIVE UTILITIES
+   ========================================================================== */
+@media (max-width: 768px) {
+  .hide-mobile {
+    display: none;
+  }
+  
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+}
+
+@media (min-width: 768px) {
+  .hide-desktop {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   PRINT STYLES
+   ========================================================================== */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  
+  body {
+    background: white;
+    color: black;
+  }
+}
+
+/* ==========================================================================
+   UTILITY CLASSES
+   ========================================================================== */
+.text-shadow {
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.text-shadow-lg {
+  text-shadow: 0 4px 8px rgba(0, 0, 0, 0.5);
+}
+
+.text-glow {
+  text-shadow: 0 0 10px currentColor;
+}
+
+.box-glow {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+}
+
+.hover-lift {
+  transition: transform 0.2s;
+}
+
+.hover-lift:hover {
+  transform: translateY(-2px);
+}
+
+.hover-scale {
+  transition: transform 0.2s;
+}
+
+.hover-scale:hover {
+  transform: scale(1.05);
+}
+
+/* ==========================================================================
+   FONT FAMILIES
+   ========================================================================== */
+.font-mono {
+  font-family: 'Fira Code', 'Courier New', monospace;
+}
+
+.font-display {
+  font-family: 'Space Grotesk', sans-serif;
+}
+
+/* ==========================================================================
+   LAYOUT UTILITIES
+   ========================================================================== */
+.min-h-screen {
+  min-height: 100vh;
+}
+
+.full-width {
+  width: 100vw;
+  position: relative;
+  left: 50%;
+  right: 50%;
+  margin-left: -50vw;
+  margin-right: -50vw;
+}
+
+/* ==========================================================================
+   CUSTOM RANGES FOR SIMULATION SPEED
+   ========================================================================== */
+input[type=range] {
+  @apply w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer;
+}
+
+input[type=range]::-webkit-slider-thumb {
+  @apply appearance-none w-4 h-4 bg-blue-500 rounded-full;
+  box-shadow: 0 0 10px #3b82f6;
+}
+
+input[type=range]::-moz-range-thumb {
+  @apply w-4 h-4 bg-blue-500 rounded-full border-none;
+  box-shadow: 0 0 10px #3b82f6;
+}
+
+/* ==========================================================================
+   DATA VISUALIZATION
+   ========================================================================== */
+.chart-tooltip {
+  @apply bg-gray-800 border border-gray-700 rounded-lg p-2 text-sm shadow-lg;
+}
+
+.chart-legend {
+  @apply flex items-center space-x-4 text-xs text-gray-400;
+}
+
+.chart-legend-item {
+  @apply flex items-center space-x-1;
+}
+
+.chart-legend-color {
+  @apply w-3 h-3 rounded;
+}
+
+/* ==========================================================================
+   TERMINATOR LINE
+   ========================================================================== */
+.terminator-line {
+  stroke: #ffaa33;
+  stroke-width: 2;
+  stroke-dasharray: 5 3;
+  opacity: 0.5;
+  animation: orbit 60s linear infinite;
+}
+
+/* ==========================================================================
+   ERROR BOUNDARY
+   ========================================================================== */
+.error-boundary {
+  @apply min-h-screen flex items-center justify-center bg-gray-900;
+}
+
+.error-message {
+  @apply text-center p-8 max-w-md;
+}
+
+.error-title {
+  @apply text-2xl font-bold text-red-400 mb-4;
+}
+
+.error-details {
+  @apply text-gray-400 mb-6;
+}

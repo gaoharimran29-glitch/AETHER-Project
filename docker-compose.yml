@@ -1,8 +1,19 @@
 version: "3.9"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# AETHER — Docker Compose
+# Runs: Redis + Backend API + Frontend dev server
+#
+# Commands:
+#   docker compose up --build          build + start all
+#   docker compose up -d --build       background
+#   docker compose logs -f backend     follow API logs
+#   docker compose down                stop
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
 
-  # ── Redis ───────────────────────────────────────────────────────────────────
+  # ── Redis ────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: aether_redis
@@ -21,30 +32,31 @@ services:
     networks:
       - aether_net
 
-  # ── AETHER Backend ──────────────────────────────────────────────────────────
+  # ── Backend API ──────────────────────────────────────────────────────────
   backend:
     build:
-      context: .
+      context: ./backend         # backend/ folder at repo root
       dockerfile: Dockerfile
     container_name: aether_backend
     restart: unless-stopped
     ports:
-      - "8000:8000"        
+      - "8000:8000"
     environment:
-      - REDIS_HOST=redis    # connects to Redis container by service name
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - PYTHONUNBUFFERED=1
     depends_on:
       redis:
         condition: service_healthy
+    # Override entrypoint.sh — Redis is separate service here
     command: >
       uvicorn main:app
       --host 0.0.0.0
       --port 8000
       --workers 1
       --log-level info
-      --reload
     volumes:
-      - .:/app            
+      - ./backend:/app
     networks:
       - aether_net
     healthcheck:
@@ -53,6 +65,28 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+
+  # ── Frontend (CRA dev server) ─────────────────────────────────────────────
+  # Serves on port 3000, proxies /api/* to backend:8000 via package.json proxy
+  frontend:
+    image: node:18-alpine
+    container_name: aether_frontend
+    restart: unless-stopped
+    working_dir: /app
+    ports:
+      - "3000:3000"
+    environment:
+      - CHOKIDAR_USEPOLLING=true   # needed for hot-reload inside Docker
+      - WDS_SOCKET_PORT=0          # fix WebSocket port for CRA
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules          # don't overwrite container node_modules
+    command: sh -c "npm install && npm start"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - aether_net
 
 volumes:
   redis_data:
