@@ -1,41 +1,52 @@
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.eggs/
+# =============================================================================
+# .dockerignore — AETHER
+# Excludes files from Docker build context to keep image small and fast
+# =============================================================================
 
-# Virtual environments
-venv/
-env/
-.env
-.venv/
+# Git
+.git
+.gitignore
+.gitattributes
 
-# IDE
-.idea/
-.vscode/
+# Frontend development files (production build is used instead)
+frontend/node_modules
+frontend/.env.local
+frontend/.env.development
+frontend/build
+
+# Python cache and virtualenvs
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.Python
+backend/.venv
+backend/venv
+backend/env
+**/*.egg-info
+
+# Test files (not needed in production image)
+backend/test_aether.py
+test_system.py
+tests/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.vscode
+.idea
 *.swp
 *.swo
 
-# Git
-.git/
-.gitignore
+# Documentation (not needed in container)
+*.md
+docs/
 
-# Test artifacts
-.pytest_cache/
-htmlcov/
-.coverage
-
-# Docker files themselves (not needed inside image)
-docker-compose.yml
+# Docker files themselves (no need to copy into image)
 Dockerfile
-
-# OS
-.DS_Store
-Thumbs.db
+docker-compose.yml
+.dockerignore
 
 # Logs
 *.log
+logs/

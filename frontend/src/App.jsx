@@ -1,6 +1,5 @@
 // src/App.jsx — AETHER Mission Control Dashboard
 // National Space Hackathon 2026, IIT Delhi
-// PS §6.2 — All 4 required modules: GroundTrackMap, BullseyePlot, TelemetryHeatmap, ManeuverTimeline
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import ThreeScene       from './components/ThreeScene';
 import GroundTrackMap   from './components/GroundTrackMap';
@@ -10,301 +9,261 @@ import ManeuverTimeline from './components/ManeuverTimeline';
 import DataIngest       from './components/DataIngest';
 import {
   fetchSnapshot, fetchStatus, fetchMetrics,
-  fetchConjunctionForecast, fetchAlertHistory, fetchNextPass,
+  fetchConjunctionForecast, fetchAlertHistory,
   simulateStep, startSimulation, stopSimulation, resetSimulation,
   checkBackendHealth,
 } from './api/aetherApi';
 
-// ── utilities ─────────────────────────────────────────────────────────────────
 function fmtTime(s) {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
-  return `${h}h ${String(m).padStart(2,'0')}m ${String(sec).padStart(2,'0')}s`;
+  if (!s || s < 0) return '0h 00m 00s';
+  return `${Math.floor(s/3600)}h ${String(Math.floor((s%3600)/60)).padStart(2,'0')}m ${String(Math.floor(s%60)).padStart(2,'0')}s`;
+}
+function fuelColor(pct) {
+  if (pct > 60) return '#34d399';
+  if (pct > 30) return '#fbbf24';
+  if (pct > 10) return '#fb923c';
+  return '#f87171';
 }
 
-const MOCK = {
-  snap: {
-    timestamp: new Date().toISOString(),
-    satellites: [
-      {id:'SAT-A01',lat:28.5,lon:77.2,fuel_kg:48.5,status:'ACTIVE',alt_km:550},
-      {id:'SAT-A02',lat:-53.1,lon:-70.9,fuel_kg:32.8,status:'ACTIVE',alt_km:550},
-      {id:'SAT-B01',lat:78.2,lon:15.4,fuel_kg:15.2,status:'WARNING',alt_km:550},
-    ],
-    debris_cloud: [['DEB-001',12.4,-45.2,400],['DEB-002',-23.5,120.3,450]],
-  },
-  status: { simulation_running:false, satellites:0, debris_objects:0, alerts:{}, elapsed_sim_time_s:0 },
-  metrics: { maneuvers_executed:0, collisions_avoided:0, fuel_used_total_kg:0, satellite_uptime_pct:{} },
-  conj: [],
-};
-
-// ── PanelBox ──────────────────────────────────────────────────────────────────
-function PanelBox({ title, sub, accent = 'blue', children, className = '' }) {
-  const cc = { blue:'#1e3a5f', red:'#4a1818', green:'#0f3020', yellow:'#3a2a08', purple:'#2a1a4a', cyan:'#0a2a35' };
-  const tc = { blue:'#3b82f6', red:'#ef4444', green:'#10b981', yellow:'#f59e0b', purple:'#8b5cf6', cyan:'#06b6d4' };
+// ── Panel ──────────────────────────────────────────────────────────────────────
+function Panel({ title, sub, color='#4d94ff', dot=true, children, style={} }) {
   return (
-    <div className={`rounded border border-gray-800/70 flex flex-col overflow-hidden ${className}`}
-         style={{ background: 'rgba(3,10,20,.88)' }}>
-      <div className="flex items-center justify-between px-3 py-2 flex-shrink-0 border-b border-gray-800/50"
-           style={{ background: `${cc[accent]}55` }}>
+    <div className="panel" style={style}>
+      <div className="panel-header">
         <div>
-          <div className="font-bold tracking-widest" style={{ fontSize:10, color:tc[accent] }}>{title}</div>
-          {sub && <div className="text-gray-600" style={{ fontSize:8, marginTop:1 }}>{sub}</div>}
+          <div className="panel-title" style={{ color }}>{title}</div>
+          {sub && <div className="panel-sub">{sub}</div>}
         </div>
-        <div className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background:tc[accent] }} />
+        {dot && <div className="panel-dot dot-blink" style={{ background:color, boxShadow:`0 0 6px ${color}` }} />}
       </div>
-      <div className="flex-1 min-h-0 overflow-hidden">{children}</div>
+      <div style={{ flex:1, minHeight:0, overflow:'hidden' }}>{children}</div>
     </div>
   );
 }
 
-// ── App ───────────────────────────────────────────────────────────────────────
+// ── Stat card ──────────────────────────────────────────────────────────────────
+function StatCard({ label, value, color, icon }) {
+  return (
+    <div className="stat-card" style={{ color }}>
+      <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:'var(--font-hud)', letterSpacing:'.1em', marginBottom:4 }}>{icon} {label}</div>
+      <div className="stat-val">{value}</div>
+    </div>
+  );
+}
+
+// ── App ────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [snapshot,     setSnapshot]     = useState(MOCK.snap);
-  const [status,       setStatus]       = useState(MOCK.status);
-  const [metrics,      setMetrics]      = useState(MOCK.metrics);
-  const [conjunctions, setConjunctions] = useState(MOCK.conj);
+  const [snapshot,     setSnapshot]     = useState(null);
+  const [status,       setStatus]       = useState({ simulation_running:false, satellites:0, debris_objects:0, elapsed_sim_time_s:0 });
+  const [metrics,      setMetrics]      = useState({ maneuvers_executed:0, collisions_avoided:0, fuel_used_total_kg:0, satellite_uptime_pct:{}, elapsed_sim_time_s:0 });
+  const [conjunctions, setConjunctions] = useState([]);
   const [alerts,       setAlerts]       = useState([]);
-  const [nextPasses,   setNextPasses]   = useState({});
-  const [selectedSat,  setSelectedSat]  = useState('SAT-A01');
-  const [tab,          setTab]          = useState('ingest');  // start on ingest so judges see it first
-  const [healthy,      setHealthy]      = useState(null);      // null = checking
+  const [selectedSat,  setSelectedSat]  = useState(null);
+  const [tab,          setTab]          = useState('ingest');
+  const [healthy,      setHealthy]      = useState(null);
   const [loading,      setLoading]      = useState(true);
-  const [notifications,setNotifications]= useState([]);
+  const [notifs,       setNotifs]       = useState([]);
   const [simSpeed,     setSimSpeed]     = useState(60);
   const [simRunning,   setSimRunning]   = useState(false);
-  const healthCheckRef = useRef(null);
+  const healthRef = useRef(null);
 
-  // ── notifications ─────────────────────────────────────────────────────────
-  const addNotif = useCallback((type, title, msg = '') => {
-    const id = Date.now();
-    setNotifications(p => [{ id, type, title, msg }, ...p].slice(0, 5));
-    setTimeout(() => setNotifications(p => p.filter(n => n.id !== id)), 5000);
+  const notify = useCallback((type, title, msg='') => {
+    const id = Date.now() + Math.random();
+    setNotifs(p => [{ id, type, title, msg }, ...p].slice(0,5));
+    setTimeout(() => setNotifs(p => p.filter(n => n.id !== id)), 5000);
   }, []);
 
-  // ── refresh all data ──────────────────────────────────────────────────────
   const refresh = useCallback(async () => {
     const [snap, stat, met, conj, hist] = await Promise.all([
-      fetchSnapshot(),
-      fetchStatus(),
-      fetchMetrics(),
-      fetchConjunctionForecast(),
-      fetchAlertHistory(),
+      fetchSnapshot(), fetchStatus(), fetchMetrics(),
+      fetchConjunctionForecast(), fetchAlertHistory(),
     ]);
-    if (snap) setSnapshot(snap);
+    if (snap) {
+      setSnapshot(snap);
+      if (!selectedSat && snap.satellites?.length > 0) setSelectedSat(snap.satellites[0].id);
+    }
     setStatus(stat);
     setMetrics(met);
     setConjunctions(conj?.forecast || []);
     setAlerts(Array.isArray(hist) ? hist : []);
     setSimRunning(stat?.simulation_running || false);
-  }, []);
+  }, [selectedSat]);
 
-  // ── initial load + health check ───────────────────────────────────────────
   useEffect(() => {
     const init = async () => {
-      // Health check with retries
       let attempts = 0;
-      const checkHealth = async () => {
+      const check = async () => {
         attempts++;
         const h = await checkBackendHealth();
         setHealthy(h.healthy);
         if (h.healthy) {
-          addNotif('ok', 'Backend connected', `Port 8000 responding`);
+          notify('ok','Backend connected','Port 8000 responding');
           await refresh();
-          // Switch to dashboard if data is already loaded
           const s = await fetchStatus();
-          if ((s?.satellites || 0) > 0) setTab('dashboard');
+          if ((s?.satellites||0) > 0) setTab('dashboard');
         } else if (attempts < 5) {
-          // Retry up to 5 times with 2s delay
-          healthCheckRef.current = setTimeout(checkHealth, 2000);
+          healthRef.current = setTimeout(check, 2000);
         } else {
-          addNotif('warn', 'Backend offline', 'Start your backend: uvicorn main:app --port 8000');
+          notify('warn','Backend offline','Run: uvicorn main:app --port 8000');
         }
         setLoading(false);
       };
-      await checkHealth();
+      await check();
     };
     init();
-    const pollId = setInterval(async () => {
+    const poll = setInterval(async () => {
       const h = await checkBackendHealth();
       setHealthy(h.healthy);
       if (h.healthy) await refresh();
     }, 3000);
-    return () => {
-      clearInterval(pollId);
-      if (healthCheckRef.current) clearTimeout(healthCheckRef.current);
-    };
+    return () => { clearInterval(poll); if (healthRef.current) clearTimeout(healthRef.current); };
   }, []);
 
-  // ── fetch next passes for selected satellite ───────────────────────────────
-  useEffect(() => {
-    if (!selectedSat || !healthy) return;
-    fetchNextPass(selectedSat).then(data => {
-      if (data?.upcoming_passes)
-        setNextPasses(p => ({ ...p, [selectedSat]: data.upcoming_passes }));
-    });
-  }, [selectedSat, healthy]);
+  const sats     = snapshot?.satellites || [];
+  const deb      = snapshot?.debris_cloud || [];
+  const critCnt  = conjunctions.filter(c => c.severity === 'CRITICAL').length;
+  const warnCnt  = conjunctions.filter(c => c.severity === 'WARNING').length;
 
-  // ── sim controls ──────────────────────────────────────────────────────────
-  const handleStep = async () => {
-    try {
-      const r = await simulateStep(simSpeed);
-      addNotif('info', `Step +${simSpeed}s`, `Col:${r.collisions_detected} Mnvr:${r.maneuvers_executed}`);
-      await refresh();
-    } catch (e) { addNotif('error', 'Step failed', e.message); }
-  };
-  const handleStart = async () => {
-    try { await startSimulation(simSpeed); setSimRunning(true); addNotif('ok', 'Simulation started', `dt=${simSpeed}s`); }
-    catch (e) { addNotif('error', 'Start failed', e.message); }
-  };
-  const handleStop = async () => {
-    try { await stopSimulation(); setSimRunning(false); addNotif('info', 'Simulation stopped', ''); }
-    catch (e) { addNotif('error', 'Stop failed', e.message); }
-  };
-  const handleReset = async () => {
-    try { await resetSimulation(); setSimRunning(false); await refresh(); addNotif('warn', 'Reset', 'All data cleared'); }
-    catch (e) { addNotif('error', 'Reset failed', e.message); }
-  };
+  const doStep  = async () => { try { const r=await simulateStep(simSpeed); notify('info',`Step +${simSpeed}s`,`Collisions: ${r.collisions_detected}  Maneuvers: ${r.maneuvers_executed}`); await refresh(); } catch(e){ notify('error','Step failed',e.message); } };
+  const doStart = async () => { try { await startSimulation(simSpeed); setSimRunning(true); notify('ok','Simulation running',`dt = ${simSpeed}s`); } catch(e){ notify('error','Start failed',e.message); } };
+  const doStop  = async () => { try { await stopSimulation(); setSimRunning(false); notify('info','Simulation stopped'); } catch(e){ notify('error','Stop failed',e.message); } };
+  const doReset = async () => { try { await resetSimulation(); setSimRunning(false); await refresh(); notify('warn','Reset','All simulation data cleared'); } catch(e){ notify('error','Reset failed',e.message); } };
 
-  const sats    = snapshot?.satellites || [];
-  const deb     = snapshot?.debris_cloud || [];
-  const critCnt = conjunctions.filter(c => c.severity === 'CRITICAL').length;
-
-  // ── loading splash ────────────────────────────────────────────────────────
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background:'#020810', fontFamily:'monospace' }}>
-        <div className="text-center">
-          <div className="relative w-28 h-28 mx-auto mb-8">
-            <div className="absolute inset-0 border-2 border-blue-500/20 rounded-full animate-ping" />
-            <div className="absolute inset-2 border-2 border-blue-400/40 rounded-full animate-spin" />
-            <div className="absolute inset-4 border-2 border-blue-300/60 rounded-full" style={{animation:'spin 3s linear infinite reverse'}} />
-            <div className="absolute inset-6 bg-blue-600/20 rounded-full animate-pulse" />
-            <div className="absolute inset-8 bg-blue-500/30 rounded-full" />
-          </div>
-          <div className="text-blue-400 font-bold tracking-[0.35em] text-5xl mb-2" style={{ textShadow:'0 0 40px #3b82f6' }}>AETHER</div>
-          <div className="text-gray-500 text-xs tracking-[0.25em] mb-6">AUTONOMOUS CONSTELLATION MANAGER</div>
-          <div className="text-gray-600 text-xs mb-8">Connecting to backend on port 8000…</div>
-          <div className="flex justify-center gap-2">
-            {[0, 0.15, 0.3].map(d => <div key={d} className="w-2 h-2 bg-blue-500/60 rounded-full animate-bounce" style={{ animationDelay:`${d}s` }} />)}
-          </div>
-          <div className="text-gray-800 text-xs mt-10 tracking-widest">NATIONAL SPACE HACKATHON 2026 · IIT DELHI</div>
+  // ── Loading screen ──────────────────────────────────────────────────────────
+  if (loading) return (
+    <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:'var(--bg-root)' }}>
+      <div style={{ textAlign:'center' }}>
+        <div style={{ position:'relative', width:130, height:130, margin:'0 auto 36px' }}>
+          <div style={{ position:'absolute', inset:0, border:'1px solid rgba(77,148,255,.1)', borderRadius:'50%' }} className="ping-out" />
+          <div style={{ position:'absolute', inset:12, border:'1px solid rgba(77,148,255,.2)', borderRadius:'50%' }} className="spin-cw" />
+          <div style={{ position:'absolute', inset:24, border:'1px solid rgba(77,148,255,.4)', borderRadius:'50%' }} className="spin-ccw" />
+          <div style={{ position:'absolute', inset:38, border:'1px solid rgba(77,148,255,.6)', borderRadius:'50%' }} />
+          <div style={{ position:'absolute', inset:50, background:'rgba(77,148,255,.15)', borderRadius:'50%' }} />
         </div>
+        <div style={{ fontFamily:'var(--font-hud)', fontSize:42, fontWeight:900, letterSpacing:'.3em', color:'var(--blue)', textShadow:'0 0 40px rgba(77,148,255,.6)', marginBottom:10 }}>AETHER</div>
+        <div style={{ fontFamily:'var(--font-hud)', fontSize:11, letterSpacing:'.2em', color:'var(--text-muted)', marginBottom:28, textTransform:'uppercase' }}>Autonomous Constellation Manager</div>
+        <div style={{ fontFamily:'var(--font-mono)', fontSize:12, color:'var(--text-faint,#1e3a5f)', marginBottom:28 }}>Connecting to backend on port 8000…</div>
+        <div style={{ display:'flex', justifyContent:'center', gap:10 }}>
+          {[0,.2,.4].map(d=>(
+            <div key={d} style={{ width:8, height:8, borderRadius:'50%', background:'rgba(77,148,255,.45)', animation:`dot-blink 1.2s ${d}s ease-in-out infinite` }} />
+          ))}
+        </div>
+        <div style={{ fontFamily:'var(--font-hud)', fontSize:10, letterSpacing:'.2em', color:'#0f1f38', marginTop:48, textTransform:'uppercase' }}>National Space Hackathon 2026 · IIT Delhi</div>
       </div>
-    );
-  }
+    </div>
+  );
 
-  // ── main render ───────────────────────────────────────────────────────────
+  // ── Main render ─────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen flex flex-col" style={{ background:'#030a14', color:'#e2e8f0', fontFamily:'monospace' }}>
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', background:'var(--bg-root)', color:'var(--text-primary)' }}>
 
-      {/* ── NOTIFICATIONS ─────────────────────────────────────────────────── */}
-      <div className="fixed top-4 right-4 z-50 flex flex-col gap-2 w-80 pointer-events-none">
-        {notifications.map(n => (
-          <div key={n.id} className={`flex items-start gap-3 p-3 rounded-lg border animate-slideIn pointer-events-auto ${
-            n.type==='error' ? 'bg-red-950/95 border-red-700/80' :
-            n.type==='warn'  ? 'bg-yellow-950/95 border-yellow-700/80' :
-            n.type==='ok'    ? 'bg-green-950/95 border-green-700/80' :
-            'bg-blue-950/95 border-blue-700/80'}`}
-            style={{ boxShadow:'0 4px 20px rgba(0,0,0,.5)' }}>
-            <span className="text-base mt-0.5">{n.type==='error'?'✗':n.type==='warn'?'⚠':n.type==='ok'?'✓':'ℹ'}</span>
-            <div className="flex-1 min-w-0">
-              <div className="font-bold text-xs text-white">{n.title}</div>
-              {n.msg && <div className="text-xs text-gray-400 truncate mt-0.5">{n.msg}</div>}
+      {/* TOASTS */}
+      <div style={{ position:'fixed', top:16, right:16, zIndex:9900, display:'flex', flexDirection:'column', gap:10, width:320, pointerEvents:'none' }}>
+        {notifs.map(n => {
+          const colors = { error:['rgba(50,5,5,.97)','rgba(248,113,113,.4)'], warn:['rgba(40,25,5,.97)','rgba(251,191,36,.4)'], ok:['rgba(5,25,15,.97)','rgba(52,211,153,.4)'], info:['rgba(5,12,35,.97)','rgba(77,148,255,.4)'] };
+          const [bg, border] = colors[n.type] || colors.info;
+          const icons = { error:'✗', warn:'⚠', ok:'✓', info:'ℹ' };
+          return (
+            <div key={n.id} className="toast" style={{ background:bg, border:`1px solid ${border}`, borderRadius:8, padding:'12px 14px', display:'flex', gap:10, pointerEvents:'auto', boxShadow:'0 8px 24px rgba(0,0,0,.5)' }}>
+              <span style={{ fontSize:16, flexShrink:0 }}>{icons[n.type]||'ℹ'}</span>
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontFamily:'var(--font-hud)', fontSize:11, color:'#fff', letterSpacing:'.05em', marginBottom:2 }}>{n.title}</div>
+                {n.msg && <div style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{n.msg}</div>}
+              </div>
+              <button onClick={()=>setNotifs(p=>p.filter(x=>x.id!==n.id))} style={{ color:'var(--text-muted)', background:'none', border:'none', cursor:'pointer', fontSize:14, flexShrink:0, lineHeight:1 }}>✕</button>
             </div>
-            <button onClick={() => setNotifications(p => p.filter(x => x.id !== n.id))} className="text-gray-600 hover:text-white text-xs">✕</button>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      {/* ── HEADER ───────────────────────────────────────────────────────── */}
-      <header className="flex-shrink-0 sticky top-0 z-40 border-b border-gray-800/50"
-              style={{ background:'rgba(2,8,18,0.97)', backdropFilter:'blur(16px)' }}>
-        <div className="flex items-center justify-between px-4 h-14">
-          {/* Logo */}
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-lg flex items-center justify-center"
-                   style={{ background:'linear-gradient(135deg,#1d4ed8,#7c3aed)', boxShadow:'0 0 20px rgba(59,130,246,.35)' }}>
-                <span className="text-white font-bold text-sm">A</span>
+      {/* HEADER */}
+      <header style={{ background:'rgba(4,8,20,.98)', borderBottom:'1px solid var(--border)', backdropFilter:'blur(20px)', position:'sticky', top:0, zIndex:200, flexShrink:0 }}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'0 20px', height:58 }}>
+
+          {/* Logo + status */}
+          <div style={{ display:'flex', alignItems:'center', gap:20 }}>
+            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+              <div style={{ width:40, height:40, borderRadius:8, background:'linear-gradient(135deg,#1d4ed8,#7c3aed)', display:'flex', alignItems:'center', justifyContent:'center', boxShadow:'0 0 20px rgba(77,148,255,.3)' }}>
+                <span style={{ fontFamily:'var(--font-hud)', fontWeight:900, fontSize:18, color:'#fff' }}>A</span>
               </div>
               <div>
-                <div className="text-blue-400 font-bold tracking-[0.25em] text-sm" style={{ textShadow:'0 0 15px rgba(59,130,246,.4)' }}>AETHER</div>
-                <div className="text-gray-700 tracking-widest" style={{ fontSize:8 }}>AUTONOMOUS CONSTELLATION MGR · NSH 2026</div>
+                <div style={{ fontFamily:'var(--font-hud)', fontWeight:900, fontSize:18, letterSpacing:'.22em', color:'var(--blue)', textShadow:'0 0 20px rgba(77,148,255,.4)' }}>AETHER</div>
+                <div style={{ fontFamily:'var(--font-mono)', fontSize:10, color:'var(--text-muted)', letterSpacing:'.12em' }}>AUTONOMOUS CONSTELLATION MANAGER</div>
               </div>
             </div>
 
-            {/* Backend status badge */}
-            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs ${
-              healthy === null ? 'border-yellow-800 text-yellow-400 bg-yellow-950/30' :
-              healthy ? 'border-green-800 text-green-400 bg-green-950/30' :
-              'border-red-800 text-red-400 bg-red-950/30'}`}>
-              <div className={`w-1.5 h-1.5 rounded-full ${
-                healthy === null ? 'bg-yellow-400 animate-pulse' :
-                healthy ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
-              {healthy === null ? 'CONNECTING…' : healthy ? 'BACKEND LIVE' : 'BACKEND OFFLINE'}
+            {/* Backend status */}
+            <div style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 12px', borderRadius:6, border:`1px solid ${healthy?'rgba(52,211,153,.3)':healthy===null?'rgba(251,191,36,.3)':'rgba(248,113,113,.3)'}`, background:healthy?'rgba(5,25,15,.5)':healthy===null?'rgba(40,25,5,.5)':'rgba(40,5,5,.5)' }}>
+              <div style={{ width:8, height:8, borderRadius:'50%', background:healthy?'#34d399':healthy===null?'#fbbf24':'#f87171', boxShadow:`0 0 6px ${healthy?'#34d399':healthy===null?'#fbbf24':'#f87171'}` }} className="dot-blink" />
+              <span style={{ fontFamily:'var(--font-hud)', fontSize:11, letterSpacing:'.08em', color:healthy?'#34d399':healthy===null?'#fbbf24':'#f87171', fontWeight:700 }}>
+                {healthy===null?'CONNECTING…':healthy?'BACKEND LIVE':'OFFLINE'}
+              </span>
             </div>
 
-            {/* Critical alert badge */}
+            {/* Critical alert */}
             {critCnt > 0 && (
-              <div className="flex items-center gap-1 px-2.5 py-1 rounded border border-red-700/80 bg-red-950/40 text-red-400 text-xs animate-pulse">
-                ⚠ {critCnt} CRITICAL
+              <div style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 12px', borderRadius:6, border:'1px solid rgba(248,113,113,.4)', background:'rgba(50,5,5,.6)' }} className="dot-blink">
+                <span style={{ fontFamily:'var(--font-hud)', fontSize:11, letterSpacing:'.08em', color:'#f87171', fontWeight:700 }}>⚠ {critCnt} CRITICAL</span>
               </div>
             )}
 
-            {/* Live data counts */}
+            {/* Live counts */}
             {healthy && (
-              <div className="flex gap-3 text-xs">
-                <span className="text-gray-600">Sats: <span className="text-blue-400 font-bold">{sats.length || status.satellites}</span></span>
-                <span className="text-gray-600">Debris: <span className="text-orange-400 font-bold">{deb.length || status.debris_objects}</span></span>
+              <div style={{ display:'flex', gap:16, padding:'6px 14px', borderRadius:6, background:'rgba(10,22,50,.5)', border:'1px solid var(--border)' }}>
+                {[['Sats',sats.length||status.satellites,'var(--blue)'],['Debris',deb.length||status.debris_objects,'var(--orange)'],['Maneuvers',metrics.maneuvers_executed||0,'var(--green)']].map(([l,v,c])=>(
+                  <div key={l} style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:1 }}>
+                    <span style={{ fontFamily:'var(--font-hud)', fontSize:16, fontWeight:800, color:c, lineHeight:1 }}>{v}</span>
+                    <span style={{ fontFamily:'var(--font-hud)', fontSize:9, color:'var(--text-muted)', letterSpacing:'.08em', textTransform:'uppercase' }}>{l}</span>
+                  </div>
+                ))}
               </div>
             )}
           </div>
 
           {/* Sim controls */}
-          <div className="flex items-center gap-2">
-            <div className="flex gap-1 rounded border border-gray-700/50 p-1"
-                 style={{ background:'rgba(8,18,35,.6)' }}>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <div style={{ display:'flex', gap:4, background:'rgba(10,22,50,.6)', border:'1px solid var(--border)', borderRadius:6, padding:5 }}>
               {[
-                { l:'⏯ STEP',  fn: handleStep,  cls:'text-blue-300 hover:bg-blue-700/50' },
-                { l:'▶ START', fn: handleStart, cls:`hover:bg-green-700/50 ${simRunning?'text-green-400':'text-gray-500'}` },
-                { l:'⏸ STOP',  fn: handleStop,  cls:'text-orange-300 hover:bg-orange-700/50' },
-                { l:'↺ RESET', fn: handleReset, cls:'text-red-300 hover:bg-red-700/40' },
-              ].map(b => (
-                <button key={b.l} onClick={b.fn}
-                  className={`px-3 py-1 rounded text-xs font-bold tracking-widest transition ${b.cls}`}
-                  style={{ fontSize:10 }}>{b.l}</button>
+                { l:'⏯ STEP',  fn:doStep,  col:'#93c5fd' },
+                { l:'▶ START', fn:doStart, col:simRunning?'#34d399':'var(--text-muted)' },
+                { l:'⏸ STOP',  fn:doStop,  col:'#fb923c' },
+                { l:'↺ RESET', fn:doReset, col:'#f87171' },
+              ].map(b=>(
+                <button key={b.l} onClick={b.fn} className="btn btn-ghost"
+                  style={{ color:b.col, fontFamily:'var(--font-hud)', fontSize:11, padding:'6px 13px', border:'none', background:'transparent' }}>
+                  {b.l}
+                </button>
               ))}
             </div>
-            <select value={simSpeed} onChange={e => setSimSpeed(+e.target.value)}
-              className="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-white">
-              {[1,10,60,300,3600].map(v => <option key={v} value={v}>dt={v}s</option>)}
+
+            <select value={simSpeed} onChange={e=>setSimSpeed(+e.target.value)} className="field-input"
+              style={{ width:'auto', padding:'7px 11px', fontSize:12 }}>
+              {[1,10,60,300,3600].map(v=><option key={v} value={v}>dt = {v}s</option>)}
             </select>
-            {/* Sim clock */}
-            <div className="px-3 py-1 rounded border border-gray-700/50 text-xs" style={{ background:'rgba(8,18,35,.6)', minWidth:100 }}>
-              <span className="text-gray-600">T+ </span>
-              <span className="text-green-400 font-bold">{fmtTime(status.elapsed_sim_time_s || 0)}</span>
+
+            <div style={{ padding:'7px 14px', background:'rgba(10,22,50,.6)', border:'1px solid var(--border)', borderRadius:6, minWidth:130 }}>
+              <span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)' }}>T+  </span>
+              <span style={{ fontFamily:'var(--font-hud)', fontSize:12, color:'var(--green)', fontWeight:700 }}>{fmtTime(status.elapsed_sim_time_s||0)}</span>
             </div>
           </div>
         </div>
 
-        {/* Tabs */}
-        <div className="flex px-4 border-t border-gray-800/40" style={{ background:'rgba(2,8,16,.5)' }}>
+        {/* Tab bar */}
+        <div style={{ display:'flex', padding:'0 20px', borderTop:'1px solid var(--border)', overflowX:'auto' }}>
           {[
-            { id:'ingest',       icon:'📥', label:'DATA INGEST',      badge:!healthy?'OFFLINE':null,   badgeRed:!healthy },
-            { id:'dashboard',    icon:'⬡',  label:'DASHBOARD'  },
-            { id:'satellites',   icon:'🛰', label:'SATELLITES'  },
-            { id:'conjunctions', icon:'⚠', label:'CONJUNCTIONS', badge: critCnt || null, badgeRed:true },
-            { id:'maneuvers',    icon:'⚡', label:'MANEUVERS'   },
-            { id:'groundstations',icon:'📡',label:'GROUND STATIONS' },
-            { id:'alerts',       icon:'📋', label:'ALERT LOG',  badge: alerts.length || null },
+            { id:'ingest',        icon:'📥', label:'Data Ingest',      badge:!healthy?'OFFLINE':null, badgeRed:!healthy },
+            { id:'dashboard',     icon:'⬡',  label:'Dashboard' },
+            { id:'satellites',    icon:'🛰',  label:'Satellites' },
+            { id:'conjunctions',  icon:'⚠',  label:'Conjunctions',     badge:critCnt+warnCnt||null, badgeRed:critCnt>0 },
+            { id:'maneuvers',     icon:'⚡',  label:'Maneuvers' },
+            { id:'groundstations',icon:'📡',  label:'Ground Stations' },
+            { id:'alerts',        icon:'📋',  label:'Alert Log',        badge:alerts.length||null },
           ].map(t => (
-            <button key={t.id} onClick={() => setTab(t.id)}
-              className={`flex items-center gap-1.5 px-4 py-2.5 border-b-2 text-xs font-bold tracking-widest transition ${
-                tab === t.id ? 'border-blue-500 text-blue-400' : 'border-transparent text-gray-600 hover:text-gray-300'}`}
-              style={{ fontSize:10 }}>
-              <span>{t.icon}</span>
+            <button key={t.id} onClick={()=>setTab(t.id)} className={`nav-tab ${tab===t.id?'active':''}`}>
+              <span style={{ fontSize:13 }}>{t.icon}</span>
               {t.label}
               {t.badge && (
-                <span className={`px-1.5 py-0.5 rounded-full text-white text-xs font-bold ${t.badgeRed ? 'bg-red-600 animate-pulse' : 'bg-gray-700'}`}>
+                <span className={`tab-badge ${t.badgeRed?'':'dim'}`} style={{ animation:t.badgeRed&&critCnt>0?'dot-blink 1.5s ease-in-out infinite':undefined }}>
                   {t.badge}
                 </span>
               )}
@@ -313,142 +272,105 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── MAIN ─────────────────────────────────────────────────────────── */}
-      <main className="flex-1 p-3 overflow-auto" style={{ minHeight:0 }}>
+      {/* MAIN */}
+      <main style={{ flex:1, padding:16, overflow:'auto' }}>
 
-        {/* DATA INGEST TAB — first thing judges see */}
+        {/* ── DATA INGEST ────────────────────────────────────────────────── */}
         {tab === 'ingest' && (
-          <div className="grid grid-cols-12 gap-3 h-full">
-            <div className="col-span-12 lg:col-span-5" style={{ minHeight:600 }}>
-              <PanelBox title="DATA INGEST & SIMULATION CONTROL" sub="Load test data · Run simulation · Ingest custom telemetry (PS §4.1)" accent="blue" className="h-full">
-                <DataIngest
-                  onDataLoaded={() => { refresh(); }}
-                  onNotify={(type, msg) => addNotif(type, msg)}
-                />
-              </PanelBox>
-            </div>
-            <div className="col-span-12 lg:col-span-7 flex flex-col gap-3">
-              {/* Connection status */}
-              <div className="rounded border p-4 text-xs" style={{
-                background:'rgba(5,15,30,.85)',
-                borderColor: healthy ? '#1a4a2a' : '#4a1818',
-              }}>
-                <div className={`font-bold text-sm mb-3 ${healthy ? 'text-green-400' : 'text-red-400'}`}>
-                  {healthy ? '✓ Backend is running and healthy' : '✗ Backend is offline'}
+          <div style={{ display:'grid', gridTemplateColumns:'400px 1fr', gap:16, maxHeight:'calc(100vh - 140px)' }}>
+            <Panel title="Data Ingest & Simulation Control" sub="POST /api/telemetry · PS §4.1" style={{ height:'100%' }}>
+              <DataIngest onDataLoaded={refresh} onNotify={(t,m)=>notify(t,m)} />
+            </Panel>
+
+            <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+              {/* Connection banner */}
+              <div style={{ padding:20, borderRadius:8, background:'var(--bg-panel)', border:`1px solid ${healthy?'rgba(52,211,153,.2)':'rgba(248,113,113,.2)'}` }}>
+                <div style={{ fontFamily:'var(--font-hud)', fontSize:14, fontWeight:700, color:healthy?'#34d399':'#f87171', marginBottom:14, letterSpacing:'.05em' }}>
+                  {healthy ? '✓  Backend is running and healthy' : '✗  Backend is offline'}
                 </div>
-                {!healthy && (
-                  <div className="space-y-2 text-gray-400">
-                    <div className="text-yellow-400 font-bold mb-2">HOW TO START THE BACKEND:</div>
-                    <div className="bg-gray-900 rounded p-2 font-mono text-xs text-green-300">
-                      # Option 1 — Direct Python<br/>
-                      cd backend/<br/>
-                      uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-                    </div>
-                    <div className="bg-gray-900 rounded p-2 font-mono text-xs text-green-300">
-                      # Option 2 — Docker (PS §8)<br/>
-                      docker build -t aether .<br/>
-                      docker run -p 8000:8000 aether
-                    </div>
-                    <div className="bg-gray-900 rounded p-2 font-mono text-xs text-green-300">
-                      # Option 3 — Docker Compose<br/>
-                      docker compose up --build
-                    </div>
-                    <div className="text-gray-600 mt-2">The frontend will auto-detect when backend comes online.</div>
+                {!healthy ? (
+                  <div>
+                    <div style={{ fontFamily:'var(--font-hud)', fontSize:11, color:' var(--yellow)', marginBottom:10, letterSpacing:'.1em', textTransform:'uppercase' }}>How to start:</div>
+                    {[['Direct Python','cd backend/ && uvicorn main:app --host 0.0.0.0 --port 8000'],['Docker (PS §8)','docker build -t aether . && docker run -p 8000:8000 aether']].map(([t,c])=>(
+                      <div key={t} style={{ borderRadius:6, padding:'10px 14px', marginBottom:8, background:'rgba(4,10,25,.8)', border:'1px solid var(--border)' }}>
+                        <div style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)', marginBottom:4 }}># {t}</div>
+                        <div style={{ fontFamily:'var(--font-mono)', fontSize:12, color:'#4ade80' }}>{c}</div>
+                      </div>
+                    ))}
                   </div>
-                )}
-                {healthy && (
-                  <div className="space-y-2">
-                    <div className="text-gray-400">Backend is running on port 8000. Use the panel on the left to:</div>
-                    <div className="grid grid-cols-2 gap-2 mt-2">
-                      {[
-                        ['🚀 Load Demo Data', 'Generates realistic satellites + debris and ingests via POST /api/telemetry'],
-                        ['☄ Test Avoidance', 'Places debris 50m from satellite to trigger full collision avoidance chain'],
-                        ['⏯ Run Simulation', 'Step forward in simulated time — each step runs RK4 + conjunction detection'],
-                        ['📥 Custom JSON', 'Paste any PS §4.1 compliant telemetry JSON directly'],
-                      ].map(([title, desc]) => (
-                        <div key={title} className="rounded border border-gray-800 p-2" style={{ background:'rgba(8,18,35,.6)' }}>
-                          <div className="text-blue-400 font-bold text-xs mb-1">{title}</div>
-                          <div className="text-gray-600 text-xs">{desc}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 pt-2 border-t border-gray-800 text-gray-500">
-                      After loading data → switch to <span className="text-blue-400">DASHBOARD</span> tab to see the 3D visualization.
-                    </div>
+                ) : (
+                  <div>
+                    <div style={{ fontFamily:'var(--font-ui)', fontSize:13, color:'var(--text-secondary)', marginBottom:14 }}>
+                    Backend is live. The left panel shows real-time simulation state and metrics.
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                    {[
+                      ['How judges test','The grading scripts POST telemetry directly to port 8000 via /api/telemetry, then call /api/simulate/step and read /api/system/metrics. No frontend interaction is needed for automated grading.'],
+                      ['How to see results','After the grader sends data, the Dashboard tab auto-activates and shows all satellites and debris in the 3D view and ground track map. Switch to the Satellites tab to see the Bullseye conjunction plot.'],
+                      ['Simulation controls','Use the Step / Start / Stop buttons in the header to manually advance simulation time and observe autonomous collision avoidance in action.'],
+                    ].map(([t,d])=>(
+                      <div key={t} style={{ borderRadius:6, padding:'12px 14px', background:'rgba(10,22,50,.6)', border:'1px solid var(--border)' }}>
+                        <div style={{ fontFamily:'var(--font-hud)', fontSize:12, color:'var(--blue)', marginBottom:6, fontWeight:600 }}>{t}</div>
+                        <div style={{ fontFamily:'var(--font-ui)', fontSize:12, color:'var(--text-muted)', lineHeight:1.6 }}>{d}</div>
+                      </div>
+                    ))}
+                  </div>
                   </div>
                 )}
               </div>
+
               {/* API reference */}
-              <div className="rounded border border-gray-800 p-3 text-xs" style={{ background:'rgba(5,15,30,.85)' }}>
-                <div className="text-gray-400 font-bold tracking-widest mb-2">API ENDPOINTS (PS §4)</div>
-                <div className="space-y-1 font-mono" style={{ fontSize:10 }}>
-                  {[
-                    ['POST', '/api/telemetry',           'Ingest satellite + debris state vectors'],
-                    ['POST', '/api/maneuver/schedule',   'Schedule burn sequence for satellite'],
-                    ['POST', '/api/simulate/step',       'Advance simulation by step_seconds'],
-                    ['GET',  '/api/visualization/snapshot', 'Optimized frontend snapshot (PS §6.3)'],
-                    ['GET',  '/api/conjunction/forecast', '24-hour CDM forecast (PS §2)'],
-                    ['GET',  '/api/system/metrics',      'Uptime, fuel, maneuver stats (PS §7)'],
-                    ['GET',  '/api/status',              'Health check endpoint (PS §8)'],
-                    ['POST', '/api/reset',               'Reset simulation state'],
-                  ].map(([method, path, desc]) => (
-                    <div key={path} className="flex gap-2 items-start py-0.5 border-b border-gray-800/50">
-                      <span className={`w-10 font-bold ${method==='POST'?'text-green-400':'text-blue-400'}`}>{method}</span>
-                      <span className="text-yellow-300 w-56">{path}</span>
-                      <span className="text-gray-500">{desc}</span>
-                    </div>
-                  ))}
-                </div>
+              <div style={{ padding:16, borderRadius:8, background:'var(--bg-panel)', border:'1px solid var(--border)', flex:1 }}>
+                <div style={{ fontFamily:'var(--font-hud)', fontSize:11, color:'var(--text-muted)', letterSpacing:'.12em', textTransform:'uppercase', marginBottom:12 }}>API Endpoints (PS §4)</div>
+                {[['POST','/api/telemetry','Ingest satellite + debris state vectors  (PS §4.1)'],['POST','/api/maneuver/schedule','Schedule burn sequence for satellite  (PS §4.2)'],['POST','/api/simulate/step','Advance simulation by step_seconds  (PS §4.3)'],['GET','/api/visualization/snapshot','Optimized frontend snapshot  (PS §6.3)'],['GET','/api/conjunction/forecast','24-hour CDM forecast  (PS §2)'],['GET','/api/system/metrics','Uptime, fuel, maneuver stats  (PS §7)'],['GET','/api/status','Health check endpoint  (PS §8 Docker)'],['POST','/api/reset','Reset simulation state']].map(([m,p,d])=>(
+                  <div key={p} style={{ display:'flex', gap:10, alignItems:'flex-start', padding:'7px 0', borderBottom:'1px solid rgba(30,80,160,.08)', fontFamily:'var(--font-mono)', fontSize:12 }}>
+                    <span style={{ color:m==='POST'?'#34d399':'#4d94ff', width:38, flexShrink:0, fontWeight:600 }}>{m}</span>
+                    <span style={{ color:'#fbbf24', width:210, flexShrink:0 }}>{p}</span>
+                    <span style={{ color:'var(--text-muted)' }}>{d}</span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
         )}
 
-        {/* DASHBOARD TAB */}
+        {/* ── DASHBOARD ─────────────────────────────────────────────────── */}
         {tab === 'dashboard' && (
-          <div className="grid grid-cols-12 gap-3">
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 340px', gap:16 }}>
             {/* 3D Globe */}
-            <div className="col-span-12 lg:col-span-8" style={{ height:540 }}>
-              <PanelBox title="3D ORBITAL VIEW" sub="WebGL Three.js · Atmosphere · Terminator · Debris Cloud · PS §6.1" accent="blue" className="h-full">
-                <ThreeScene satellites={sats} debris={deb} selectedSat={selectedSat} onSatelliteClick={id => { setSelectedSat(id); addNotif('info', `Selected ${id}`); }} />
-              </PanelBox>
-            </div>
+            <Panel title="3D Orbital View" sub="WebGL · Three.js · 50+ sats · 10k+ debris · 60 FPS · Atmosphere · Terminator  (PS §6.1)" style={{ height:520 }}>
+              <ThreeScene satellites={sats} debris={deb} selectedSat={selectedSat}
+                onSatelliteClick={id=>{setSelectedSat(id);notify('info',`Selected  ${id}`);}} />
+            </Panel>
 
             {/* Right column */}
-            <div className="col-span-12 lg:col-span-4 flex flex-col gap-3" style={{ height:540 }}>
-              {/* Quick stats */}
-              <div className="grid grid-cols-2 gap-2">
-                {[
-                  { label:'SATELLITES', val:sats.length || status.satellites, col:'#3b82f6', icon:'🛰' },
-                  { label:'DEBRIS',     val:deb.length || status.debris_objects, col:'#f97316', icon:'☄' },
-                  { label:'MANEUVERS',  val:metrics.maneuvers_executed || 0, col:'#10b981', icon:'⚡' },
-                  { label:'AVOIDED',    val:metrics.collisions_avoided  || 0, col:'#8b5cf6', icon:'🛡' },
-                ].map(s => (
-                  <div key={s.label} className="rounded border border-gray-800/60 p-3"
-                       style={{ background:'rgba(5,15,30,.85)' }}>
-                    <div className="text-gray-600 text-xs tracking-widest">{s.icon} {s.label}</div>
-                    <div className="text-2xl font-bold mt-1" style={{ color:s.col }}>{s.val}</div>
-                  </div>
-                ))}
+            <div style={{ display:'flex', flexDirection:'column', gap:12, height:520 }}>
+              {/* 4 stat cards */}
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:10, flexShrink:0 }}>
+                <StatCard label="Satellites"  value={sats.length||status.satellites}    color="var(--blue)"   icon="🛰" />
+                <StatCard label="Debris"      value={deb.length||status.debris_objects} color="var(--orange)" icon="☄" />
+                <StatCard label="Maneuvers"   value={metrics.maneuvers_executed||0}      color="var(--green)"  icon="⚡" />
+                <StatCard label="Avoided"     value={metrics.collisions_avoided||0}      color="var(--purple)" icon="🛡" />
               </div>
 
               {/* Conjunction alerts */}
-              <div className="flex-1 rounded border border-gray-800/60 flex flex-col overflow-hidden"
-                   style={{ background:'rgba(5,15,30,.85)' }}>
-                <div className="px-3 py-2 border-b border-gray-800/50 text-xs font-bold tracking-widest text-red-400">⚠ CONJUNCTION ALERTS</div>
-                <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                  {conjunctions.filter(c => c.severity !== 'SAFE').length === 0
-                    ? <div className="text-gray-700 text-xs text-center py-4">No active threats</div>
-                    : conjunctions.filter(c => c.severity !== 'SAFE').map((c, i) => (
-                      <div key={i} onClick={() => { setSelectedSat(c.sat_id); setTab('satellites'); }}
-                        className={`p-2 rounded cursor-pointer border-l-2 hover:opacity-80 transition ${
-                          c.severity === 'CRITICAL' ? 'bg-red-950/40 border-red-500' : 'bg-yellow-950/30 border-yellow-500'}`}>
-                        <div className="flex justify-between text-xs">
-                          <span className="text-white font-bold">{c.sat_id} ↔ {c.deb_id}</span>
-                          <span className="text-gray-500">{c.tca_offset_s?.toFixed(0)}s</span>
+              <div style={{ flex:1, borderRadius:8, background:'var(--bg-panel)', border:'1px solid rgba(248,113,113,.2)', display:'flex', flexDirection:'column', overflow:'hidden' }}>
+                <div style={{ padding:'12px 14px', borderBottom:'1px solid rgba(248,113,113,.15)', fontFamily:'var(--font-hud)', fontSize:11, fontWeight:700, color:'#f87171', letterSpacing:'.1em', flexShrink:0 }}>
+                  ⚠  CONJUNCTION ALERTS
+                </div>
+                <div style={{ flex:1, overflowY:'auto', padding:10 }}>
+                  {conjunctions.filter(c=>c.severity!=='SAFE').length===0
+                    ? <div style={{ fontFamily:'var(--font-mono)', fontSize:12, color:'var(--text-muted)', textAlign:'center', padding:'24px 0' }}>No active threats</div>
+                    : conjunctions.filter(c=>c.severity!=='SAFE').map((c,i)=>(
+                      <div key={i} onClick={()=>{setSelectedSat(c.sat_id);setTab('satellites');}}
+                        style={{ padding:'9px 11px', borderRadius:5, marginBottom:6, cursor:'pointer', borderLeft:`3px solid ${c.severity==='CRITICAL'?'#f87171':'#fbbf24'}`, background:c.severity==='CRITICAL'?'rgba(50,5,5,.4)':'rgba(50,30,5,.3)' }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', marginBottom:3 }}>
+                          <span style={{ fontFamily:'var(--font-hud)', fontSize:12, color:'#fff', fontWeight:700 }}>{c.sat_id} ↔ {c.deb_id}</span>
+                          <span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)' }}>{c.tca_offset_s?.toFixed(0)}s</span>
                         </div>
-                        <div className="text-gray-500 text-xs mt-0.5">
-                          {c.min_dist_km?.toFixed(3)} km · <span className={c.severity==='CRITICAL'?'text-red-400':'text-yellow-400'}>{c.severity}</span>
+                        <div style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)' }}>
+                          Miss: {c.min_dist_km?.toFixed(3)} km ·{' '}
+                          <span style={{ color:c.severity==='CRITICAL'?'#f87171':'#fbbf24', fontWeight:600 }}>{c.severity}</span>
                         </div>
                       </div>
                     ))
@@ -456,21 +378,21 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Fuel bars */}
-              <div className="rounded border border-gray-800/60 p-3" style={{ background:'rgba(5,15,30,.85)' }}>
-                <div className="text-yellow-400 text-xs font-bold tracking-widest mb-2">⛽ FLEET FUEL</div>
-                {sats.length === 0
-                  ? <div className="text-gray-700 text-xs text-center py-2">No satellites loaded</div>
-                  : sats.slice(0, 5).map(sat => {
-                    const pct = Math.max(0, Math.min(100, (sat.fuel_kg / 50) * 100));
-                    const col = pct > 60 ? '#10b981' : pct > 30 ? '#f59e0b' : '#ef4444';
+              {/* Fleet fuel */}
+              <div style={{ borderRadius:8, background:'var(--bg-panel)', border:'1px solid var(--border)', padding:'12px 14px', flexShrink:0 }}>
+                <div style={{ fontFamily:'var(--font-hud)', fontSize:11, fontWeight:700, color:'var(--yellow)', letterSpacing:'.1em', marginBottom:10 }}>⛽  Fleet Fuel</div>
+                {sats.length===0
+                  ? <div style={{ fontFamily:'var(--font-mono)', fontSize:12, color:'var(--text-muted)', textAlign:'center' }}>No satellites loaded</div>
+                  : sats.slice(0,6).map(sat => {
+                    const pct = Math.max(0,Math.min(100,(sat.fuel_kg/50)*100));
+                    const col = fuelColor(pct);
                     return (
-                      <div key={sat.id} className="flex items-center gap-2 mb-1">
-                        <span className="text-xs text-gray-500 w-14 truncate">{sat.id.slice(-6)}</span>
-                        <div className="flex-1 h-1.5 bg-gray-800 rounded overflow-hidden">
-                          <div className="h-full rounded transition-all" style={{ width:`${pct}%`, background:col }} />
+                      <div key={sat.id} style={{ display:'flex', alignItems:'center', gap:10, marginBottom:7 }}>
+                        <span style={{ fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-secondary)', width:60, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', flexShrink:0 }}>{sat.id.slice(-7)}</span>
+                        <div className="fuel-bar" style={{ flex:1 }}>
+                          <div className="fuel-bar-fill" style={{ width:`${pct}%`, background:col, boxShadow:`0 0 6px ${col}55` }} />
                         </div>
-                        <span className="text-xs w-10 text-right" style={{ color:col }}>{pct.toFixed(0)}%</span>
+                        <span style={{ fontFamily:'var(--font-hud)', fontSize:11, color:col, width:34, textAlign:'right', flexShrink:0 }}>{pct.toFixed(0)}%</span>
                       </div>
                     );
                   })
@@ -478,235 +400,211 @@ export default function App() {
               </div>
             </div>
 
-            {/* Ground Track Map */}
-            <div className="col-span-12" style={{ height:280 }}>
-              <PanelBox title="GROUND TRACK MAP" sub="Mercator · 90-min trail · RK4 prediction · Terminator · Debris cloud · PS §6.2" accent="blue" className="h-full">
+            {/* Ground Track Map — full width */}
+            <div style={{ gridColumn:'1 / -1' }}>
+              <Panel title="Ground Track Map" sub="Mercator Projection · 90-min trail · RK4 predicted trajectory · Terminator line · Debris cloud  (PS §6.2)" style={{ height:300 }}>
                 <GroundTrackMap satellites={sats} debris={deb} selectedSat={selectedSat}
                   timestamp={snapshot?.timestamp} onSatClick={setSelectedSat} />
-              </PanelBox>
+              </Panel>
             </div>
           </div>
         )}
 
-        {/* SATELLITES TAB */}
+        {/* ── SATELLITES ────────────────────────────────────────────────── */}
         {tab === 'satellites' && (
-          <div className="grid grid-cols-12 gap-3">
-            {/* Satellite list */}
-            <div className="col-span-12 lg:col-span-3">
-              <PanelBox title="SATELLITE FLEET" sub="Click to select" accent="blue" className="h-full" style={{ minHeight:200 }}>
-                <div className="overflow-y-auto p-2 space-y-1">
-                  {sats.length === 0
-                    ? <div className="text-gray-600 text-xs text-center py-6">No satellites — go to Data Ingest tab</div>
-                    : sats.map(sat => {
-                      const pct = (sat.fuel_kg / 50) * 100;
-                      const col = pct > 60 ? '#10b981' : pct > 30 ? '#f59e0b' : '#ef4444';
-                      return (
-                        <div key={sat.id} onClick={() => setSelectedSat(sat.id)}
-                          className={`p-2 rounded cursor-pointer border text-xs transition ${selectedSat === sat.id ? 'border-blue-500 bg-blue-950/40' : 'border-gray-800 hover:border-gray-600'}`}>
-                          <div className="flex justify-between">
-                            <span className="font-bold text-white">{sat.id}</span>
-                            <span className="text-xs px-1.5 py-0.5 rounded font-bold" style={{ background: sat.status==='GRAVEYARD'?'#374151':sat.status==='ACTIVE'?'#064e3b':'#7f1d1d', color:'#fff', fontSize:8 }}>{sat.status}</span>
-                          </div>
-                          <div className="mt-1 h-1 bg-gray-800 rounded overflow-hidden">
-                            <div className="h-full rounded" style={{ width:`${pct}%`, background:col }} />
-                          </div>
-                          <div className="text-gray-600 mt-0.5">{sat.fuel_kg?.toFixed(1)}kg · {sat.lat?.toFixed(1)}°N {sat.lon?.toFixed(1)}°E</div>
+          <div style={{ display:'grid', gridTemplateColumns:'240px 1fr 1fr', gap:16 }}>
+            {/* Fleet list */}
+            <Panel title="Satellite Fleet" sub="Click to select" style={{ gridRow:'1/3', maxHeight:'calc(100vh - 140px)' }}>
+              <div style={{ overflowY:'auto', padding:10, height:'100%' }}>
+                {sats.length===0
+                  ? <div style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-muted)', textAlign:'center', padding:'30px 0' }}>No satellites — load data first</div>
+                  : sats.map(sat => {
+                    const pct = (sat.fuel_kg/50)*100;
+                    const col = fuelColor(pct);
+                    const isSel = sat.id === selectedSat;
+                    return (
+                      <div key={sat.id} onClick={()=>setSelectedSat(sat.id)}
+                        style={{ padding:'10px 12px', borderRadius:6, marginBottom:6, cursor:'pointer', border:`1px solid ${isSel?'rgba(77,148,255,.5)':'var(--border)'}`, background:isSel?'rgba(15,31,56,.7)':'var(--bg-card)', transition:'all .15s' }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
+                          <span style={{ fontFamily:'var(--font-hud)', fontSize:12, color:'#fff', fontWeight:700 }}>{sat.id}</span>
+                          <span className={`badge ${sat.status==='GRAVEYARD'?'badge-graveyard':pct<10?'badge-critical':pct<30?'badge-warning':'badge-active'}`}>{sat.status||'ACTIVE'}</span>
                         </div>
-                      );
-                    })
-                  }
-                </div>
-              </PanelBox>
-            </div>
-            <div className="col-span-12 lg:col-span-5" style={{ height:500 }}>
-              <PanelBox title={`BULLSEYE — ${selectedSat}`} sub="Conjunction Polar Chart · TCA radial distance · Risk color coding · PS §6.2" accent="red" className="h-full">
-                <BullseyePlot satelliteId={selectedSat} conjunctions={conjunctions} />
-              </PanelBox>
-            </div>
-            <div className="col-span-12 lg:col-span-4" style={{ height:500 }}>
-              <PanelBox title="TELEMETRY HEATMAP" sub="Fuel gauges · ΔV efficiency · Uptime radar · PS §6.2" accent="green" className="h-full">
-                <TelemetryHeatmap satellites={sats} metrics={metrics} />
-              </PanelBox>
-            </div>
-            <div className="col-span-12" style={{ height:300 }}>
-              <PanelBox title="MANEUVER TIMELINE" sub="Gantt · Burn blocks · 600s Cooldown · Blackout zones · PS §6.2" accent="yellow" className="h-full">
-                <ManeuverTimeline satelliteId={selectedSat} onBurnClick={b => addNotif('info', 'Burn selected', b.burn_id)} />
-              </PanelBox>
-            </div>
+                        <div className="fuel-bar" style={{ marginBottom:5 }}>
+                          <div className="fuel-bar-fill" style={{ width:`${pct}%`, background:col }} />
+                        </div>
+                        <div style={{ fontFamily:'var(--font-mono)', fontSize:10, color:'var(--text-muted)', display:'flex', justifyContent:'space-between' }}>
+                          <span>{sat.fuel_kg?.toFixed(1)} kg</span>
+                          <span>{sat.lat?.toFixed(1)}° {sat.lon?.toFixed(1)}°</span>
+                        </div>
+                      </div>
+                    );
+                  })
+                }
+              </div>
+            </Panel>
+
+            {/* Bullseye */}
+            <Panel title={`Bullseye — ${selectedSat || 'Select a satellite'}`} sub="Conjunction Polar Chart · TCA radial distance · Risk color-coding  (PS §6.2)" color="var(--red)" style={{ height:460 }}>
+              <BullseyePlot satelliteId={selectedSat} conjunctions={conjunctions} />
+            </Panel>
+
+            {/* Telemetry */}
+            <Panel title="Telemetry & Resource Monitor" sub="Fuel gauges · ΔV efficiency · Uptime radar  (PS §6.2)" color="var(--green)" style={{ height:460 }}>
+              <TelemetryHeatmap satellites={sats} metrics={metrics} />
+            </Panel>
+
+            {/* Timeline */}
+            <Panel title="Maneuver Timeline" sub="Gantt Scheduler · Burn blocks · 600 s Cooldown · LOS Blackout zones  (PS §6.2)" color="var(--yellow)" style={{ gridColumn:'2/4', height:300 }}>
+              <ManeuverTimeline satelliteId={selectedSat} onBurnClick={b=>notify('info','Burn selected',b.burn_id)} />
+            </Panel>
           </div>
         )}
 
-        {/* CONJUNCTIONS TAB */}
+        {/* ── CONJUNCTIONS ──────────────────────────────────────────────── */}
         {tab === 'conjunctions' && (
-          <div className="grid grid-cols-12 gap-3">
-            <div className="col-span-12 grid grid-cols-3 gap-3">
-              {[['CRITICAL', '#ef4444'], ['WARNING', '#f59e0b'], ['SAFE', '#10b981']].map(([sev, col]) => (
-                <div key={sev} className="rounded border border-gray-800 p-4 text-center" style={{ background:'rgba(5,15,30,.85)' }}>
-                  <div className="text-4xl font-bold mb-1" style={{ color:col }}>
-                    {conjunctions.filter(c => c.severity === sev).length}
-                  </div>
-                  <div className="text-gray-500 text-xs tracking-widest">{sev}</div>
-                </div>
-              ))}
-            </div>
-            <div className="col-span-8" style={{ height:450 }}>
-              <PanelBox title="24-HOUR CDM FORECAST" sub="All predicted conjunctions · PS §2 requirement" accent="red" className="h-full">
-                <div className="overflow-y-auto h-full">
-                  {conjunctions.length === 0
-                    ? <div className="text-gray-600 text-xs text-center py-12">No conjunctions forecast — ingest data and run simulation</div>
-                    : <table className="w-full text-xs">
-                        <thead className="sticky top-0" style={{ background:'rgba(3,10,20,.95)' }}>
-                          <tr className="text-gray-500 border-b border-gray-800">
-                            {['Satellite','Debris','TCA (s)','Distance','Severity','Prob','Action'].map(h =>
-                              <th key={h} className="text-left py-2 px-3 font-bold tracking-widest" style={{ fontSize:9 }}>{h}</th>
-                            )}
-                          </tr>
-                        </thead>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 380px', gap:16 }}>
+            <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+              {/* Counts */}
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:12 }}>
+                {[['CRITICAL',conjunctions.filter(c=>c.severity==='CRITICAL').length,'var(--red)'],['WARNING',conjunctions.filter(c=>c.severity==='WARNING').length,'var(--yellow)'],['SAFE',conjunctions.filter(c=>c.severity==='SAFE').length,'var(--green)']].map(([s,v,c])=>(
+                  <StatCard key={s} label={s} value={v} color={c} />
+                ))}
+              </div>
+              {/* CDM table */}
+              <Panel title="24-Hour CDM Forecast" sub="Predictive conjunction assessment · 24 h lookahead  (PS §2)" color="var(--red)" style={{ flex:1 }}>
+                <div style={{ overflowY:'auto', maxHeight:500 }}>
+                  {conjunctions.length===0
+                    ? <div style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-muted)', textAlign:'center', padding:'50px 0' }}>No conjunctions forecast — ingest data and run simulation</div>
+                    : (
+                      <table className="data-table">
+                        <thead><tr>{['Satellite','Debris','TCA','Miss Dist','Severity','Pc','Action'].map(h=><th key={h}>{h}</th>)}</tr></thead>
                         <tbody>
-                          {conjunctions.map((c, i) => (
-                            <tr key={i} className="border-b border-gray-800/40 hover:bg-gray-800/20 cursor-pointer" onClick={() => setSelectedSat(c.sat_id)}>
-                              <td className="py-2 px-3 text-blue-400 font-bold">{c.sat_id}</td>
-                              <td className="py-2 px-3 text-gray-300">{c.deb_id}</td>
-                              <td className="py-2 px-3 text-gray-300">{c.tca_offset_s?.toFixed(0)}</td>
-                              <td className="py-2 px-3 text-gray-300">{c.min_dist_km?.toFixed(3)} km</td>
-                              <td className="py-2 px-3">
-                                <span className={`px-2 py-0.5 rounded text-xs font-bold ${c.severity==='CRITICAL'?'bg-red-700':c.severity==='WARNING'?'bg-yellow-700':'bg-green-800'}`}>{c.severity}</span>
-                              </td>
-                              <td className="py-2 px-3 text-gray-400">{c.prob?.toFixed(4) || '—'}</td>
-                              <td className="py-2 px-3 text-green-400 text-xs">{c.action || 'MONITORING'}</td>
+                          {conjunctions.map((c,i)=>(
+                            <tr key={i} style={{ cursor:'pointer' }} onClick={()=>setSelectedSat(c.sat_id)}>
+                              <td style={{ color:'var(--blue)', fontFamily:'var(--font-hud)', fontWeight:700, fontSize:12 }}>{c.sat_id}</td>
+                              <td style={{ fontFamily:'var(--font-mono)' }}>{c.deb_id}</td>
+                              <td style={{ fontFamily:'var(--font-mono)' }}>{c.tca_offset_s?.toFixed(0)} s</td>
+                              <td style={{ fontFamily:'var(--font-mono)' }}>{c.min_dist_km?.toFixed(3)} km</td>
+                              <td><span className={`badge ${c.severity==='CRITICAL'?'badge-critical':c.severity==='WARNING'?'badge-warning':'badge-active'}`}>{c.severity}</span></td>
+                              <td style={{ fontFamily:'var(--font-mono)', color:'var(--text-secondary)' }}>{c.prob?.toFixed(4)||'—'}</td>
+                              <td style={{ fontFamily:'var(--font-mono)', color:'var(--green)', fontSize:11 }}>{c.action||'MONITORING'}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
+                    )
                   }
                 </div>
-              </PanelBox>
+              </Panel>
             </div>
-            <div className="col-span-4" style={{ height:450 }}>
-              <PanelBox title={`BULLSEYE — ${selectedSat}`} sub="PS §6.2" accent="red" className="h-full">
-                <BullseyePlot satelliteId={selectedSat} conjunctions={conjunctions} />
-              </PanelBox>
-            </div>
+            <Panel title={`Bullseye — ${selectedSat||'Select a satellite'}`} sub="(PS §6.2)" color="var(--red)" style={{ height:'calc(100vh - 160px)' }}>
+              <BullseyePlot satelliteId={selectedSat} conjunctions={conjunctions} />
+            </Panel>
           </div>
         )}
 
-        {/* MANEUVERS TAB */}
+        {/* ── MANEUVERS ─────────────────────────────────────────────────── */}
         {tab === 'maneuvers' && (
-          <div className="grid grid-cols-12 gap-3">
-            <div className="col-span-12 grid grid-cols-4 gap-3">
+          <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12 }}>
+              <StatCard label="Total Maneuvers"    value={metrics.maneuvers_executed||0}                                                          color="var(--blue)" />
+              <StatCard label="Collisions Avoided" value={metrics.collisions_avoided||0}                                                          color="var(--green)" />
+              <StatCard label="Fuel Consumed"      value={`${(metrics.fuel_used_total_kg||0).toFixed(2)} kg`}                                    color="var(--yellow)" />
+              <StatCard label="Avoid Rate"         value={`${Math.min(100,(((metrics.collisions_avoided||0)/Math.max(metrics.maneuvers_executed||1,1))*100)).toFixed(1)}%`} color="var(--purple)" />
+            </div>
+            <Panel title="Maneuver Timeline" sub="Gantt Scheduler · Burn blocks · 600 s Cooldown (PS §5.1) · LOS Blackout zones (PS §5.4)  (PS §6.2)" color="var(--yellow)" style={{ height:360 }}>
+              <ManeuverTimeline satelliteId={selectedSat} onBurnClick={b=>notify('info','Burn',b.burn_id)} />
+            </Panel>
+            <Panel title="ΔV Efficiency Analysis" sub="Fuel vs Collisions Avoided · Uptime Radar · Mission Score  (PS §6.2 §7)" color="var(--purple)" style={{ height:440 }}>
+              <TelemetryHeatmap satellites={sats} metrics={metrics} />
+            </Panel>
+          </div>
+        )}
+
+        {/* ── GROUND STATIONS ───────────────────────────────────────────── */}
+        {tab === 'groundstations' && (
+          <div style={{ display:'flex', flexDirection:'column', gap:16 }}>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:14 }}>
               {[
-                { l:'Total Maneuvers', v:metrics.maneuvers_executed||0, col:'#3b82f6' },
-                { l:'Collisions Avoided', v:metrics.collisions_avoided||0, col:'#10b981' },
-                { l:'Fuel Used', v:`${(metrics.fuel_used_total_kg||0).toFixed(2)} kg`, col:'#f59e0b' },
-                { l:'Success Rate', v:`${Math.min(100,(((metrics.collisions_avoided||0)/Math.max(metrics.maneuvers_executed||1,1))*100)).toFixed(1)}%`, col:'#8b5cf6' },
-              ].map(s => (
-                <div key={s.l} className="rounded border border-gray-800 p-4" style={{ background:'rgba(5,15,30,.85)' }}>
-                  <div className="text-gray-600 text-xs tracking-widest mb-1">{s.l.toUpperCase()}</div>
-                  <div className="text-3xl font-bold" style={{ color:s.col }}>{s.v}</div>
+                { name:'ISTRAC Bengaluru',      lat:13.03,  lon:77.52,   alt:820,  minEl:5  },
+                { name:'Svalbard Station',       lat:78.23,  lon:15.41,   alt:400,  minEl:5  },
+                { name:'Goldstone Tracking',     lat:35.43,  lon:-116.89, alt:1000, minEl:10 },
+                { name:'Punta Arenas',           lat:-53.15, lon:-70.92,  alt:30,   minEl:5  },
+                { name:'IIT Delhi Ground Node',  lat:28.55,  lon:77.19,   alt:225,  minEl:15 },
+                { name:'McMurdo Station',        lat:-77.85, lon:166.67,  alt:10,   minEl:5  },
+              ].map((gs,i) => (
+                <div key={gs.name} style={{ padding:18, borderRadius:8, background:'var(--bg-panel)', border:'1px solid var(--border)' }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:14 }}>
+                    <div style={{ fontFamily:'var(--font-hud)', fontSize:13, color:'var(--cyan)', fontWeight:700 }}>{gs.name}</div>
+                    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+                      <div style={{ width:8, height:8, borderRadius:'50%', background:'#34d399', boxShadow:'0 0 8px #34d399' }} className="dot-blink" />
+                      <span style={{ fontFamily:'var(--font-hud)', fontSize:10, color:'#34d399' }}>ONLINE</span>
+                    </div>
+                  </div>
+                  <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
+                    {[['Latitude',`${gs.lat}°`],['Longitude',`${gs.lon}°`],['Altitude',`${gs.alt} m`],['Min Elevation',`${gs.minEl}°`]].map(([l,v])=>(
+                      <div key={l}>
+                        <div style={{ fontFamily:'var(--font-hud)', fontSize:9, color:'var(--text-muted)', letterSpacing:'.1em', textTransform:'uppercase', marginBottom:3 }}>{l}</div>
+                        <div style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-primary)', fontWeight:500 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ marginTop:12, paddingTop:10, borderTop:'1px solid var(--border)' }}>
+                    <span style={{ fontFamily:'var(--font-hud)', fontSize:10, color:'var(--text-muted)', letterSpacing:'.1em' }}>GS-00{i+1}  ·  OPERATIONAL</span>
+                  </div>
                 </div>
               ))}
             </div>
-            <div className="col-span-12" style={{ height:360 }}>
-              <PanelBox title="MANEUVER TIMELINE" sub="Gantt Scheduler · Burns · Cooldown blocks · LOS blackout · PS §6.2" accent="yellow" className="h-full">
-                <ManeuverTimeline satelliteId={selectedSat} onBurnClick={b => addNotif('info', 'Burn', b.burn_id)} />
-              </PanelBox>
-            </div>
-            <div className="col-span-12" style={{ height:340 }}>
-              <PanelBox title="ΔV EFFICIENCY ANALYSIS" sub="Fuel vs Collisions Avoided · PS §6.2 §7" accent="purple" className="h-full">
-                <TelemetryHeatmap satellites={sats} metrics={metrics} />
-              </PanelBox>
-            </div>
+            <Panel title="Ground Track Map" sub="Ground station coverage overlay  (PS §5.4 §5.5.1)" color="var(--cyan)" style={{ height:300 }}>
+              <GroundTrackMap satellites={sats} debris={[]} selectedSat={selectedSat}
+                timestamp={snapshot?.timestamp} onSatClick={setSelectedSat} />
+            </Panel>
           </div>
         )}
 
-        {/* GROUND STATIONS TAB */}
-        {tab === 'groundstations' && (
-          <div className="grid grid-cols-3 gap-3">
-            {[
-              { name:'ISTRAC Bengaluru',      lat:13.0333, lon:77.5167,   alt:820,  minEl:5 },
-              { name:'Svalbard Sat Station',  lat:78.2297, lon:15.4077,   alt:400,  minEl:5 },
-              { name:'Goldstone Tracking',    lat:35.4266, lon:-116.89,   alt:1000, minEl:10 },
-              { name:'Punta Arenas',          lat:-53.15,  lon:-70.9167,  alt:30,   minEl:5 },
-              { name:'IIT Delhi Ground Node', lat:28.545,  lon:77.1926,   alt:225,  minEl:15 },
-              { name:'McMurdo Station',       lat:-77.8463,lon:166.6682,  alt:10,   minEl:5 },
-            ].map((gs, i) => {
-              const passes = nextPasses[selectedSat] || [];
-              const pass   = passes[i];
-              const wait   = pass?.estimated_wait_seconds;
-              return (
-                <div key={gs.name} className="rounded border border-gray-800 p-4" style={{ background:'rgba(5,15,30,.85)' }}>
-                  <div className="flex justify-between items-start mb-3">
-                    <div className="text-blue-400 font-bold text-xs">{gs.name}</div>
-                    <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-                  </div>
-                  <div className="space-y-1 text-xs text-gray-400">
-                    <div>Lat: <span className="text-white">{gs.lat}°</span></div>
-                    <div>Lon: <span className="text-white">{gs.lon}°</span></div>
-                    <div>Alt: <span className="text-white">{gs.alt} m</span></div>
-                    <div>Min El: <span className="text-white">{gs.minEl}°</span></div>
-                  </div>
-                  <div className="mt-3 pt-2 border-t border-gray-800 text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Next pass for {selectedSat?.slice(-4)}:</span>
-                      <span className={wait != null ? 'text-green-400 font-bold' : 'text-gray-700'}>
-                        {wait != null ? `${Math.floor(wait/60)}m ${wait%60}s` : '—'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {/* ALERT LOG TAB */}
+        {/* ── ALERT LOG ─────────────────────────────────────────────────── */}
         {tab === 'alerts' && (
-          <PanelBox title="CDM ALERT HISTORY" sub="All conjunction data messages logged · PS §2" accent="red" className="h-full" style={{ minHeight:500 }}>
-            <div className="overflow-y-auto" style={{ maxHeight:'calc(100vh - 200px)' }}>
-              {alerts.length === 0
-                ? <div className="text-gray-600 text-xs text-center py-16">No CDM alerts yet — run simulation to generate conjunction data</div>
-                : <table className="w-full text-xs">
-                    <thead className="sticky top-0" style={{ background:'rgba(3,10,20,.95)' }}>
-                      <tr className="text-gray-500 border-b border-gray-800">
-                        {['Alert ID','Time','Satellite','Debris','Distance','Severity','Prob','Action'].map(h =>
-                          <th key={h} className="text-left py-2 px-3 font-bold" style={{ fontSize:9 }}>{h}</th>
-                        )}
-                      </tr>
-                    </thead>
+          <Panel title="CDM Alert History" sub="All conjunction data messages · Autonomous maneuver log" color="var(--red)" style={{ minHeight:'calc(100vh - 160px)' }}>
+            <div style={{ overflowY:'auto', maxHeight:'calc(100vh - 200px)' }}>
+              {alerts.length===0
+                ? <div style={{ fontFamily:'var(--font-mono)', fontSize:13, color:'var(--text-muted)', textAlign:'center', padding:'80px 0' }}>No CDM alerts yet — run simulation to generate conjunction data</div>
+                : (
+                  <table className="data-table">
+                    <thead><tr>{['Alert ID','Time','Satellite','Debris','Miss Dist','Severity','Pc','Action'].map(h=><th key={h}>{h}</th>)}</tr></thead>
                     <tbody>
-                      {alerts.map((a, i) => (
-                        <tr key={i} className="border-b border-gray-800/40 hover:bg-gray-800/20">
-                          <td className="py-2 px-3 text-gray-600 font-mono text-xs">{a.alert_id?.slice(-10)}</td>
-                          <td className="py-2 px-3 text-gray-400">{a.timestamp?.slice(11,19)}</td>
-                          <td className="py-2 px-3 text-blue-400 font-bold">{a.sat_id}</td>
-                          <td className="py-2 px-3 text-gray-300">{a.deb_id}</td>
-                          <td className="py-2 px-3 text-gray-300">{a.distance?.toFixed(3)} km</td>
-                          <td className="py-2 px-3"><span className={`px-1.5 py-0.5 rounded text-xs font-bold ${a.severity==='CRITICAL'?'bg-red-800':a.severity==='WARNING'?'bg-yellow-800':'bg-green-800'}`}>{a.severity}</span></td>
-                          <td className="py-2 px-3 text-gray-400">{a.prob?.toFixed(4)}</td>
-                          <td className="py-2 px-3 text-green-400">{a.action}</td>
+                      {alerts.map((a,i)=>(
+                        <tr key={i}>
+                          <td style={{ fontFamily:'var(--font-mono)', color:'var(--text-muted)' }}>{a.alert_id?.slice(-10)}</td>
+                          <td style={{ fontFamily:'var(--font-mono)' }}>{a.timestamp?.slice(11,19)}</td>
+                          <td style={{ fontFamily:'var(--font-hud)', color:'var(--blue)', fontWeight:700, fontSize:12 }}>{a.sat_id}</td>
+                          <td style={{ fontFamily:'var(--font-mono)' }}>{a.deb_id}</td>
+                          <td style={{ fontFamily:'var(--font-mono)' }}>{a.distance?.toFixed(3)} km</td>
+                          <td><span className={`badge ${a.severity==='CRITICAL'?'badge-critical':a.severity==='WARNING'?'badge-warning':'badge-active'}`}>{a.severity}</span></td>
+                          <td style={{ fontFamily:'var(--font-mono)', color:'var(--text-secondary)' }}>{a.prob?.toFixed(4)}</td>
+                          <td style={{ fontFamily:'var(--font-mono)', color:'var(--green)' }}>{a.action}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                )
               }
             </div>
-          </PanelBox>
+          </Panel>
         )}
       </main>
 
-      {/* ── STATUS BAR ────────────────────────────────────────────────────── */}
-      <footer className="flex-shrink-0 border-t border-gray-800/40 flex justify-between items-center px-4 h-7 text-xs"
-              style={{ background:'rgba(2,8,16,.95)', color:'#374151' }}>
-        <div className="flex gap-4">
+      {/* STATUS BAR */}
+      <footer style={{ flexShrink:0, borderTop:'1px solid var(--border)', display:'flex', justifyContent:'space-between', alignItems:'center', padding:'0 20px', height:30, background:'rgba(3,6,16,.98)', fontFamily:'var(--font-mono)', fontSize:11, color:'var(--text-muted)' }}>
+        <div style={{ display:'flex', gap:20 }}>
           <span>© 2026 AETHER · National Space Hackathon · IIT Delhi</span>
-          <span>|</span>
-          <span>Backend: <span className={healthy?'text-green-500':'text-red-500'}>{healthy?'ONLINE':'OFFLINE'}</span></span>
+          <span>Backend: <span style={{ color:healthy?'#34d399':'#f87171', fontWeight:600 }}>{healthy?'ONLINE':'OFFLINE'}</span></span>
+          <span>Sim: <span style={{ color:simRunning?'#34d399':'var(--text-muted)', fontWeight:600 }}>{simRunning?'RUNNING':'PAUSED'}</span></span>
         </div>
-        <div className="flex gap-4">
-          <span>Sats: <span className="text-blue-400">{sats.length||status.satellites}</span></span>
-          <span>Debris: <span className="text-orange-400">{deb.length||status.debris_objects}</span></span>
-          <span>Sim: <span className={simRunning?'text-green-400':'text-gray-600'}>{simRunning?'RUNNING':'PAUSED'}</span></span>
-          <span>Elapsed: <span className="text-blue-400">{fmtTime(status.elapsed_sim_time_s||0)}</span></span>
+        <div style={{ display:'flex', gap:20 }}>
+          <span>Sats: <span style={{ color:'var(--blue)', fontWeight:600 }}>{sats.length||status.satellites}</span></span>
+          <span>Debris: <span style={{ color:'var(--orange)', fontWeight:600 }}>{deb.length||status.debris_objects}</span></span>
+          <span>Elapsed: <span style={{ color:'var(--green)', fontWeight:600 }}>{fmtTime(status.elapsed_sim_time_s||0)}</span></span>
+          <span>Poll: <span style={{ color:'var(--green)' }}>3 s</span></span>
         </div>
       </footer>
     </div>

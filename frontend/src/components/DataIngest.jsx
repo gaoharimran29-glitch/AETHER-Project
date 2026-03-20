@@ -1,224 +1,147 @@
 // src/components/DataIngest.jsx
-// Judge/Demo control panel — ingest telemetry, run simulation, test all PS endpoints
-// This is what hackathon judges use to load data and test your system
-import React, { useState } from 'react';
-import {
-  ingestTelemetry, createTestTelemetry, resetSimulation,
-  simulateStep, startSimulation, stopSimulation,
-} from '../api/aetherApi';
-
-const BTN = 'px-3 py-1.5 rounded text-xs font-bold tracking-widest transition border';
+// System Status & API Reference panel
+// The grading scripts POST data directly to the API — no demo data generation needed
+import React, { useState, useEffect } from 'react';
+import { fetchStatus, fetchMetrics, fetchAlertHistory, simulateStep, resetSimulation } from '../api/aetherApi';
 
 export default function DataIngest({ onDataLoaded, onNotify }) {
-  const [numSats,    setNumSats]    = useState(6);
-  const [numDebris,  setNumDebris]  = useState(50);
-  const [stepSecs,   setStepSecs]   = useState(60);
-  const [autoSteps,  setAutoSteps]  = useState(10);
-  const [running,    setRunning]    = useState(false);
-  const [log,        setLog]        = useState([]);
-  const [customJson, setCustomJson] = useState('');
-  const [jsonErr,    setJsonErr]    = useState('');
+  const [status,  setStatus]  = useState(null);
+  const [metrics, setMetrics] = useState(null);
+  const [alerts,  setAlerts]  = useState([]);
+  const [stepSecs,setStepSecs]= useState(60);
+  const [busy,    setBusy]    = useState(false);
 
-  const addLog = (msg, type = 'info') => {
-    const time = new Date().toLocaleTimeString();
-    setLog(p => [`[${time}] ${msg}`, ...p].slice(0, 30));
-    if (onNotify) onNotify(type, msg);
-  };
+  useEffect(() => {
+    const load = async () => {
+      const [s, m, a] = await Promise.all([fetchStatus(), fetchMetrics(), fetchAlertHistory()]);
+      setStatus(s); setMetrics(m); setAlerts(Array.isArray(a) ? a : []);
+    };
+    load();
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, []);
 
-  // Load demo data
-  const handleLoadDemo = async () => {
-    try {
-      setRunning(true);
-      addLog(`Generating ${numSats} satellites + ${numDebris} debris objects…`);
-      const data = createTestTelemetry(numSats, numDebris);
-      const r    = await ingestTelemetry(data);
-      addLog(`✓ Ingested: ${r.processed_count} objects. CDM warnings: ${r.active_cdm_warnings}`, 'ok');
-      if (onDataLoaded) onDataLoaded();
-    } catch (e) {
-      addLog(`✗ Ingest failed: ${e.message}`, 'error');
-    } finally { setRunning(false); }
-  };
-
-  // Ingest custom JSON
-  const handleCustomIngest = async () => {
-    setJsonErr('');
-    let parsed;
-    try { parsed = JSON.parse(customJson); }
-    catch (e) { setJsonErr(`JSON parse error: ${e.message}`); return; }
-    try {
-      setRunning(true);
-      const r = await ingestTelemetry(parsed);
-      addLog(`✓ Custom data ingested: ${r.processed_count} objects`, 'ok');
-      if (onDataLoaded) onDataLoaded();
-    } catch (e) {
-      addLog(`✗ Custom ingest failed: ${e.message}`, 'error');
-    } finally { setRunning(false); }
-  };
-
-  // Single step
-  const handleStep = async () => {
+  const doStep = async () => {
+    setBusy(true);
     try {
       const r = await simulateStep(stepSecs);
-      addLog(`✓ Step +${stepSecs}s → collisions: ${r.collisions_detected}, maneuvers: ${r.maneuvers_executed}`, 'ok');
+      if (onNotify) onNotify('ok', `Step +${stepSecs}s`, `col:${r.collisions_detected} mnvr:${r.maneuvers_executed}`);
       if (onDataLoaded) onDataLoaded();
-    } catch (e) { addLog(`✗ Step failed: ${e.message}`, 'error'); }
+    } catch (e) {
+      if (onNotify) onNotify('error', 'Step failed', e.message);
+    } finally { setBusy(false); }
   };
 
-  // Auto-step N times
-  const handleAutoStep = async () => {
-    setRunning(true);
-    try {
-      for (let i = 0; i < autoSteps; i++) {
-        const r = await simulateStep(stepSecs);
-        addLog(`Step ${i + 1}/${autoSteps} +${stepSecs}s → col:${r.collisions_detected} mnvr:${r.maneuvers_executed}`);
-        if (onDataLoaded) onDataLoaded();
-        await new Promise(res => setTimeout(res, 200));
-      }
-      addLog(`✓ Auto-step complete: ${autoSteps} × ${stepSecs}s = ${autoSteps * stepSecs}s sim time`, 'ok');
-    } catch (e) { addLog(`✗ Auto-step failed: ${e.message}`, 'error'); }
-    finally { setRunning(false); }
-  };
-
-  // Reset
-  const handleReset = async () => {
+  const doReset = async () => {
+    setBusy(true);
     try {
       await resetSimulation();
-      addLog('✓ Simulation reset — all data cleared', 'warn');
+      if (onNotify) onNotify('warn', 'Reset', 'All simulation data cleared');
       if (onDataLoaded) onDataLoaded();
-    } catch (e) { addLog(`✗ Reset failed: ${e.message}`, 'error'); }
+    } catch (e) {
+      if (onNotify) onNotify('error', 'Reset failed', e.message);
+    } finally { setBusy(false); }
   };
 
-  // Close approach scenario — triggers avoidance
-  const handleCollisionTest = async () => {
-    try {
-      setRunning(true);
-      addLog('Ingesting CLOSE APPROACH scenario (50m separation)…');
-      const data = {
-        timestamp: new Date().toISOString(),
-        objects: [
-          { id:'SAT-DANGER', type:'SATELLITE', r:{x:6778.000,y:0,z:0}, v:{x:0,y:7.67,z:0}, fuel:50 },
-          { id:'DEB-CLOSE',  type:'DEBRIS',    r:{x:6778.050,y:0,z:0}, v:{x:0,y:7.60,z:0} },
-        ],
-      };
-      await ingestTelemetry(data);
-      addLog('Ingested. Running step to trigger avoidance…');
-      const r = await simulateStep(1);
-      addLog(`✓ Avoidance test: col=${r.collisions_detected} mnvr=${r.maneuvers_executed}`, r.maneuvers_executed > 0 ? 'ok' : 'warn');
-      if (onDataLoaded) onDataLoaded();
-    } catch (e) { addLog(`✗ Collision test failed: ${e.message}`, 'error'); }
-    finally { setRunning(false); }
-  };
-
-  const sampleJson = JSON.stringify({
-    timestamp: new Date().toISOString(),
-    objects: [
-      { id:'SAT-X01', type:'SATELLITE', r:{x:6778,y:0,z:0}, v:{x:0,y:7.67,z:0}, fuel:50 },
-      { id:'DEB-X01', type:'DEBRIS',    r:{x:6800,y:100,z:0}, v:{x:0,y:7.60,z:0} },
-    ],
-  }, null, 2);
+  const S = (label, value, color = '#94a3b8') => (
+    <div key={label} style={{ display:'flex', justifyContent:'space-between', padding:'7px 0', borderBottom:'1px solid rgba(30,58,95,.3)' }}>
+      <span style={{ fontSize:12, color:'#475569' }}>{label}</span>
+      <span style={{ fontSize:12, fontFamily:'var(--font-mono,monospace)', color, fontWeight:600 }}>{value ?? '—'}</span>
+    </div>
+  );
 
   return (
-    <div className="w-full h-full flex flex-col gap-3 overflow-y-auto p-1" style={{ fontFamily: 'monospace' }}>
+    <div style={{ padding:16, height:'100%', overflowY:'auto', display:'flex', flexDirection:'column', gap:16 }}>
 
-      {/* ── Quick actions ── */}
-      <div className="rounded border border-gray-800 p-3" style={{ background: 'rgba(5,15,30,.85)' }}>
-        <div className="text-blue-400 text-xs font-bold tracking-widest mb-3">⚡ QUICK ACTIONS</div>
-
-        <div className="grid grid-cols-2 gap-2 mb-3">
-          <div>
-            <label className="text-gray-500 text-xs block mb-1">Satellites</label>
-            <input type="number" value={numSats} min={1} max={60} onChange={e => setNumSats(+e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white text-xs" />
-          </div>
-          <div>
-            <label className="text-gray-500 text-xs block mb-1">Debris objects</label>
-            <input type="number" value={numDebris} min={1} max={500} onChange={e => setNumDebris(+e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white text-xs" />
-          </div>
+      {/* Simulation state */}
+      <div style={{ borderRadius:6, border:'1px solid rgba(77,148,255,.2)', padding:14, background:'rgba(10,22,50,.5)' }}>
+        <div style={{ fontFamily:'var(--font-hud,monospace)', fontSize:11, color:'#4d94ff', letterSpacing:'.12em', marginBottom:12, textTransform:'uppercase' }}>
+          Simulation State
         </div>
-
-        <button onClick={handleLoadDemo} disabled={running}
-          className={`w-full ${BTN} bg-blue-700/60 border-blue-600 text-blue-200 hover:bg-blue-600/80 mb-2 ${running ? 'opacity-50 cursor-not-allowed' : ''}`}>
-          🚀 LOAD DEMO CONSTELLATION
-        </button>
-
-        <button onClick={handleCollisionTest} disabled={running}
-          className={`w-full ${BTN} bg-red-800/50 border-red-700 text-red-200 hover:bg-red-700/70 ${running ? 'opacity-50 cursor-not-allowed' : ''}`}>
-          ☄ TEST COLLISION AVOIDANCE (50m separation)
-        </button>
+        {status ? (
+          <div>
+            {S('Status',        status.simulation_running ? 'RUNNING' : 'PAUSED',   status.simulation_running ? '#34d399' : '#fbbf24')}
+            {S('Sim Time',      `T + ${Math.floor((status.elapsed_sim_time_s||0)/3600)}h ${Math.floor(((status.elapsed_sim_time_s||0)%3600)/60)}m`, '#34d399')}
+            {S('Satellites',    status.satellites,    '#4d94ff')}
+            {S('Debris Objects',status.debris_objects,'#fb923c')}
+            {S('CDM Warnings',  alerts.length,        alerts.length > 0 ? '#f87171' : '#34d399')}
+          </div>
+        ) : (
+          <div style={{ fontSize:12, color:'#334155', textAlign:'center', padding:'12px 0' }}>Loading…</div>
+        )}
       </div>
 
-      {/* ── Simulation controls ── */}
-      <div className="rounded border border-gray-800 p-3" style={{ background: 'rgba(5,15,30,.85)' }}>
-        <div className="text-green-400 text-xs font-bold tracking-widest mb-3">▶ SIMULATION CONTROLS</div>
-
-        <div className="grid grid-cols-2 gap-2 mb-2">
+      {/* Performance metrics */}
+      <div style={{ borderRadius:6, border:'1px solid rgba(52,211,153,.2)', padding:14, background:'rgba(5,20,15,.4)' }}>
+        <div style={{ fontFamily:'var(--font-hud,monospace)', fontSize:11, color:'#34d399', letterSpacing:'.12em', marginBottom:12, textTransform:'uppercase' }}>
+          Performance Metrics
+        </div>
+        {metrics ? (
           <div>
-            <label className="text-gray-500 text-xs block mb-1">Step seconds (dt)</label>
-            <select value={stepSecs} onChange={e => setStepSecs(+e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white text-xs">
-              {[1, 10, 60, 300, 600, 3600].map(v => <option key={v} value={v}>{v}s {v >= 3600 ? '(1hr)' : v >= 60 ? `(${v/60}min)` : ''}</option>)}
+            {S('Maneuvers Executed',  metrics.maneuvers_executed,                               '#4d94ff')}
+            {S('Collisions Avoided',  metrics.collisions_avoided,                               '#34d399')}
+            {S('Fuel Used (total)',   `${(metrics.fuel_used_total_kg||0).toFixed(3)} kg`,        '#fbbf24')}
+            {S('Avoid Rate',         metrics.maneuvers_executed > 0
+                ? `${((metrics.collisions_avoided/metrics.maneuvers_executed)*100).toFixed(1)}%`
+                : '—',                                                                          '#a78bfa')}
+          </div>
+        ) : (
+          <div style={{ fontSize:12, color:'#334155', textAlign:'center', padding:'12px 0' }}>Loading…</div>
+        )}
+      </div>
+
+      {/* Simulation controls */}
+      <div style={{ borderRadius:6, border:'1px solid rgba(251,191,36,.2)', padding:14, background:'rgba(20,15,5,.4)' }}>
+        <div style={{ fontFamily:'var(--font-hud,monospace)', fontSize:11, color:'#fbbf24', letterSpacing:'.12em', marginBottom:12, textTransform:'uppercase' }}>
+          Simulation Controls
+        </div>
+        <div style={{ display:'flex', gap:8, marginBottom:8 }}>
+          <div style={{ flex:1 }}>
+            <label style={{ display:'block', fontSize:10, color:'#475569', marginBottom:4, fontFamily:'var(--font-hud,monospace)', letterSpacing:'.08em', textTransform:'uppercase' }}>Step Size</label>
+            <select value={stepSecs} onChange={e => setStepSecs(+e.target.value)} style={{ width:'100%', background:'rgba(4,12,28,.9)', border:'1px solid rgba(251,191,36,.25)', borderRadius:4, padding:'7px 10px', color:'#e2e8f0', fontSize:12, fontFamily:'var(--font-mono,monospace)' }}>
+              {[1,10,60,300,600,3600].map(v => <option key={v} value={v}>{v}s{v>=3600?' (1hr)':v>=60?` (${v/60}min)`:''}</option>)}
             </select>
           </div>
-          <div>
-            <label className="text-gray-500 text-xs block mb-1">Auto-step count</label>
-            <input type="number" value={autoSteps} min={1} max={100} onChange={e => setAutoSteps(+e.target.value)}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-white text-xs" />
+          <div style={{ display:'flex', alignItems:'flex-end', gap:6 }}>
+            <button onClick={doStep} disabled={busy} style={{ padding:'8px 14px', borderRadius:4, border:'1px solid rgba(52,211,153,.3)', background:'rgba(52,211,153,.1)', color:'#6ee7b7', fontFamily:'var(--font-hud,monospace)', fontSize:11, cursor:busy?'not-allowed':'pointer', opacity:busy?.5:1, letterSpacing:'.06em', textTransform:'uppercase' }}>
+              ⏯ Step
+            </button>
+            <button onClick={doReset} disabled={busy} style={{ padding:'8px 14px', borderRadius:4, border:'1px solid rgba(248,113,113,.3)', background:'rgba(248,113,113,.1)', color:'#fca5a5', fontFamily:'var(--font-hud,monospace)', fontSize:11, cursor:busy?'not-allowed':'pointer', opacity:busy?.5:1, letterSpacing:'.06em', textTransform:'uppercase' }}>
+              ↺ Reset
+            </button>
           </div>
         </div>
-
-        <div className="flex gap-2 mb-2">
-          <button onClick={handleStep} disabled={running}
-            className={`flex-1 ${BTN} bg-green-800/50 border-green-700 text-green-200 hover:bg-green-700/60 ${running ? 'opacity-50 cursor-not-allowed' : ''}`}>
-            ⏯ STEP ({stepSecs}s)
-          </button>
-          <button onClick={handleAutoStep} disabled={running}
-            className={`flex-1 ${BTN} bg-emerald-800/50 border-emerald-700 text-emerald-200 hover:bg-emerald-700/60 ${running ? 'opacity-50 cursor-not-allowed' : ''}`}>
-            ⏩ AUTO ×{autoSteps}
-          </button>
-        </div>
-
-        <button onClick={handleReset} disabled={running}
-          className={`w-full ${BTN} bg-orange-900/40 border-orange-800 text-orange-300 hover:bg-orange-800/50 ${running ? 'opacity-50 cursor-not-allowed' : ''}`}>
-          ↺ RESET SIMULATION
-        </button>
-      </div>
-
-      {/* ── Custom JSON ingest ── */}
-      <div className="rounded border border-gray-800 p-3" style={{ background: 'rgba(5,15,30,.85)' }}>
-        <div className="text-yellow-400 text-xs font-bold tracking-widest mb-2">📥 CUSTOM JSON INGEST</div>
-        <div className="text-gray-600 text-xs mb-2">Paste PS §4.1 format telemetry JSON:</div>
-        <textarea
-          value={customJson}
-          onChange={e => { setCustomJson(e.target.value); setJsonErr(''); }}
-          placeholder={sampleJson}
-          rows={6}
-          className="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1.5 text-gray-300 text-xs font-mono resize-none mb-1"
-          style={{ fontSize: 10 }}
-        />
-        {jsonErr && <div className="text-red-400 text-xs mb-1">{jsonErr}</div>}
-        <button onClick={handleCustomIngest} disabled={running || !customJson.trim()}
-          className={`w-full ${BTN} bg-yellow-800/40 border-yellow-700 text-yellow-200 hover:bg-yellow-700/50 ${(!customJson.trim() || running) ? 'opacity-40 cursor-not-allowed' : ''}`}>
-          📤 INGEST CUSTOM DATA
-        </button>
-      </div>
-
-      {/* ── Activity log ── */}
-      <div className="rounded border border-gray-800 p-3 flex-1 min-h-0" style={{ background: 'rgba(2,8,16,.9)' }}>
-        <div className="text-gray-500 text-xs font-bold tracking-widest mb-2">📋 ACTIVITY LOG</div>
-        <div className="overflow-y-auto space-y-0.5" style={{ maxHeight: 180 }}>
-          {log.length === 0
-            ? <div className="text-gray-700 text-xs text-center py-4">No activity yet — load demo data to start</div>
-            : log.map((l, i) => (
-              <div key={i} className={`text-xs font-mono ${
-                l.includes('✓') ? 'text-green-400' :
-                l.includes('✗') ? 'text-red-400' :
-                l.includes('↺') ? 'text-yellow-400' : 'text-gray-400'
-              }`}>{l}</div>
-            ))
-          }
+        <div style={{ fontSize:11, color:'#334155', fontFamily:'var(--font-mono,monospace)', lineHeight:1.6 }}>
+          Use the Step button to manually advance simulation time.<br/>
+          The grading system sends telemetry and steps automatically.
         </div>
       </div>
+
+      {/* API reference */}
+      <div style={{ borderRadius:6, border:'1px solid rgba(30,58,95,.5)', padding:14, background:'rgba(4,10,22,.7)' }}>
+        <div style={{ fontFamily:'var(--font-hud,monospace)', fontSize:11, color:'#475569', letterSpacing:'.12em', marginBottom:12, textTransform:'uppercase' }}>
+          API Endpoints (PS §4)
+        </div>
+        {[
+          ['POST', '/api/telemetry',              '#34d399', 'Ingest satellite + debris state vectors'],
+          ['POST', '/api/maneuver/schedule',       '#34d399', 'Schedule burn sequence for satellite'],
+          ['POST', '/api/simulate/step',           '#34d399', 'Advance simulation by step_seconds'],
+          ['GET',  '/api/visualization/snapshot',  '#4d94ff', 'Frontend snapshot (PS §6.3)'],
+          ['GET',  '/api/conjunction/forecast',    '#4d94ff', '24-hour CDM forecast (PS §2)'],
+          ['GET',  '/api/system/metrics',          '#4d94ff', 'Uptime, fuel, maneuver stats (PS §7)'],
+          ['GET',  '/api/status',                  '#4d94ff', 'Health check (PS §8 Docker)'],
+          ['POST', '/api/reset',                   '#fbbf24', 'Reset simulation state'],
+        ].map(([method, path, color, desc]) => (
+          <div key={path} style={{ display:'flex', gap:8, padding:'5px 0', borderBottom:'1px solid rgba(30,58,95,.2)', fontFamily:'var(--font-mono,monospace)', fontSize:11 }}>
+            <span style={{ color, width:36, flexShrink:0, fontWeight:700 }}>{method}</span>
+            <span style={{ color:'#fbbf24', width:220, flexShrink:0 }}>{path}</span>
+            <span style={{ color:'#334155' }}>{desc}</span>
+          </div>
+        ))}
+        <div style={{ marginTop:12, padding:'10px 12px', borderRadius:4, background:'rgba(10,22,50,.6)', border:'1px solid rgba(30,58,95,.4)' }}>
+        </div>
+      </div>
+
     </div>
   );
 }

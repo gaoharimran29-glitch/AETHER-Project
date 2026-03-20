@@ -1,194 +1,139 @@
 // src/components/TelemetryHeatmap.jsx
-// PS §6.2 — Telemetry & Resource Heatmaps
-// FIXED: removed random/simulated data, all real from backend;
-//        proper fuel gauge per satellite, ΔV cost vs collisions avoided chart
-
+// PS §6.2 — Telemetry & Resource Heatmaps: fuel gauges, ΔV efficiency, uptime radar
 import React, { useMemo, useState } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, AreaChart, Area, RadarChart, Radar,
-  PolarGrid, PolarAngleAxis, PolarRadiusAxis, ScatterChart,
-  Scatter, ZAxis, Cell, Legend,
+  ResponsiveContainer, RadarChart, Radar, PolarGrid,
+  PolarAngleAxis, PolarRadiusAxis, ScatterChart, Scatter, ZAxis, Cell,
 } from 'recharts';
 
-const INITIAL_FUEL = 50.0; // kg  PS §5.1
+const INIT_FUEL = 50.0;  // kg PS §5.1
 
-function fuelColor(pct) {
+function fc(pct) {
   if (pct < 10) return '#ef4444';
-  if (pct < 30) return '#f59e0b';
+  if (pct < 30) return '#f97316';
   if (pct < 60) return '#3b82f6';
   return '#10b981';
 }
 
-function statusBadge(status) {
-  const map = {
-    NOMINAL:   'bg-green-900/40 text-green-400 border-green-700',
-    GRAVEYARD: 'bg-gray-800 text-gray-500 border-gray-600',
-    EVADING:   'bg-yellow-900/40 text-yellow-400 border-yellow-700',
-    ACTIVE:    'bg-blue-900/40 text-blue-400 border-blue-700',
-  };
-  return `inline-flex px-1.5 py-0.5 rounded border text-xs font-mono ${map[status] || map.ACTIVE}`;
-}
-
-const FuelGauge = ({ sat }) => {
+function FuelGauge({ sat }) {
   const fuel = sat.fuel_kg ?? sat.fuel ?? 0;
-  const pct  = Math.max(0, Math.min(100, (fuel / INITIAL_FUEL) * 100));
-  const col  = fuelColor(pct);
+  const pct  = Math.max(0, Math.min(100, (fuel / INIT_FUEL) * 100));
+  const col  = fc(pct);
   return (
-    <div className="mb-3">
+    <div className="mb-2.5">
       <div className="flex justify-between items-center mb-1">
         <div className="flex items-center gap-2">
-          <span className="text-xs font-mono text-gray-300 truncate max-w-[120px]">{sat.id}</span>
-          <span className={statusBadge(sat.status)}>{sat.status}</span>
+          <span style={{ fontFamily:"'Share Tech Mono',monospace", fontSize:10, color:'#cbd5e1' }}>{sat.id}</span>
+          <span className={`badge ${
+            sat.status==='GRAVEYARD'?'badge-graveyard':
+            pct<10?'badge-critical':pct<30?'badge-warning':'badge-active'
+          }`}>{sat.status||'ACTIVE'}</span>
         </div>
-        <span className="text-xs font-mono" style={{ color: col }}>{pct.toFixed(1)}%</span>
+        <span style={{ fontFamily:"'Orbitron',monospace", fontSize:12, color:col }}>{pct.toFixed(1)}%</span>
       </div>
-      <div className="w-full h-2.5 bg-gray-800 rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-500"
-          style={{
-            width: `${pct}%`,
-            background: `linear-gradient(90deg, ${col}88, ${col})`,
-            boxShadow: `0 0 6px ${col}66`,
-          }}
-        />
+      <div className="fuel-bar">
+        <div className="fuel-bar-fill" style={{
+          width:`${pct}%`,
+          background:`linear-gradient(90deg,${col}80,${col})`,
+          boxShadow:`0 0 8px ${col}55`,
+        }} />
       </div>
-      <div className="flex justify-between text-xs text-gray-600 mt-0.5">
+      <div className="flex justify-between mt-0.5" style={{ fontSize:11, color:'var(--text-muted)', fontFamily:"'Share Tech Mono',monospace" }}>
         <span>{fuel.toFixed(1)} kg</span>
-        <span>{(INITIAL_FUEL - fuel).toFixed(1)} kg used</span>
+        <span>{(INIT_FUEL-fuel).toFixed(1)} kg used</span>
       </div>
     </div>
   );
+}
+
+const VIEWS = ['Fuel','Efficiency','Uptime','Score'];
+
+const TT = {
+  contentStyle:{ background:'#040f1f', border:'1px solid rgba(30,80,160,0.4)', borderRadius:3, fontFamily:"'Share Tech Mono',monospace", fontSize:10 },
+  labelStyle:{ color:'#60a0d0' }, itemStyle:{ color:'#cbd5e1' },
 };
 
-const VIEWS = ['fuel', 'efficiency', 'uptime', 'history'];
+export default function TelemetryHeatmap({ satellites=[], metrics={} }) {
+  const [view, setView] = useState('Fuel');
 
-const TelemetryHeatmap = ({ satellites = [], metrics = {} }) => {
-  const [view, setView] = useState('fuel');
-
-  // ── Derived chart data (all from real props, no Math.random) ───────────────
-
-  const fuelBarData = useMemo(() =>
-    satellites
-      .map(s => ({
-        name:    s.id.slice(-8),
-        fullId:  s.id,
-        fuel:    s.fuel_kg ?? s.fuel ?? 0,
-        pct:     Math.max(0, ((s.fuel_kg ?? s.fuel ?? 0) / INITIAL_FUEL) * 100),
-        status:  s.status,
-      }))
-      .sort((a, b) => b.fuel - a.fuel),
-    [satellites]
-  );
-
-  const efficiencyData = useMemo(() => [{
-    name:             'Mission',
-    fuelUsed:         metrics.fuel_used_total_kg ?? 0,
-    collisionsAvoided: metrics.collisions_avoided  ?? 0,
-    maneuvers:        metrics.maneuvers_executed   ?? 0,
-    efficiency:       (metrics.maneuvers_executed ?? 0) > 0
-                        ? Math.min(100, ((metrics.collisions_avoided ?? 0) / metrics.maneuvers_executed) * 100)
-                        : 0,
-  }], [metrics]);
+  const fuelData = useMemo(() =>
+    satellites.map(s => ({ name:s.id.slice(-7), fuel:s.fuel_kg??s.fuel??0, pct:((s.fuel_kg??s.fuel??0)/INIT_FUEL)*100, status:s.status, fullId:s.id }))
+    .sort((a,b)=>b.fuel-a.fuel), [satellites]);
 
   const uptimeData = useMemo(() =>
-    Object.entries(metrics.satellite_uptime_pct || {})
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([id, pct]) => ({ subject: id.slice(-6), uptime: pct, fullMark: 100 })),
-    [metrics]
-  );
+    Object.entries(metrics.satellite_uptime_pct||{}).sort((a,b)=>b[1]-a[1]).slice(0,8)
+    .map(([id,pct])=>({ subject:id.slice(-6), uptime:pct, fullMark:100 })), [metrics]);
 
-  const dvScatterData = useMemo(() =>
-    satellites.map(s => ({
-      satId:   s.id,
-      fuelUsed: INITIAL_FUEL - (s.fuel_kg ?? s.fuel ?? INITIAL_FUEL),
-      uptime:   metrics.satellite_uptime_pct?.[s.id] ?? 100,
-    })),
-    [satellites, metrics]
-  );
+  const scatterData = useMemo(() =>
+    satellites.map(s=>({ satId:s.id, fuelUsed:INIT_FUEL-(s.fuel_kg??s.fuel??INIT_FUEL), uptime:metrics.satellite_uptime_pct?.[s.id]??100 })), [satellites,metrics]);
 
-  const CustomFuelTooltip = ({ active, payload }) => {
-    if (!active || !payload?.length) return null;
-    const d = payload[0].payload;
-    return (
-      <div className="bg-gray-900 border border-gray-700 rounded p-2 text-xs font-mono">
-        <div className="text-blue-400 font-bold mb-1">{d.fullId}</div>
-        <div className="text-gray-300">Fuel: <span className="text-white">{d.fuel.toFixed(2)} kg</span></div>
-        <div className="text-gray-300">Remaining: <span style={{ color: fuelColor(d.pct) }}>{d.pct.toFixed(1)}%</span></div>
-        <div className="text-gray-300">Status: <span className="text-white">{d.status}</span></div>
-      </div>
-    );
-  };
+  const avoidRate = (metrics.maneuvers_executed??0) > 0
+    ? Math.min(100,(((metrics.collisions_avoided??0)/metrics.maneuvers_executed)*100)).toFixed(1)
+    : '—';
 
-  const summaryStats = [
-    { label: 'Total Maneuvers',    value: metrics.maneuvers_executed  ?? 0, color: '#3b82f6' },
-    { label: 'Collisions Avoided', value: metrics.collisions_avoided  ?? 0, color: '#10b981' },
-    { label: 'Fuel Used (kg)',     value: (metrics.fuel_used_total_kg ?? 0).toFixed(2), color: '#f59e0b' },
-    { label: 'Sim Time (min)',     value: Math.round((metrics.elapsed_sim_time_s ?? 0) / 60), color: '#8b5cf6' },
-  ];
+  const avgUptime = uptimeData.length > 0
+    ? (uptimeData.reduce((s,d)=>s+d.uptime,0)/uptimeData.length).toFixed(1)
+    : '—';
 
   return (
-    <div className="w-full h-full bg-gray-900 rounded-lg p-4 font-mono overflow-y-auto flex flex-col gap-4">
-
+    <div className="w-full h-full flex flex-col gap-3 p-3 overflow-y-auto" style={{ background:'rgba(2,8,18,.95)' }}>
       {/* Header + view selector */}
       <div className="flex justify-between items-center flex-shrink-0">
         <div>
-          <h3 className="text-blue-400 font-bold tracking-widest text-sm">TELEMETRY & RESOURCE HEATMAP</h3>
-          <p className="text-gray-600 text-xs mt-0.5">Fleet-wide health monitoring  ·  PS §6.2</p>
+          <div style={{ fontFamily:"'Orbitron',sans-serif", fontSize:10, letterSpacing:'0.15em', color:'#3b82f6' }}>TELEMETRY & RESOURCE MONITOR</div>
+          <div style={{ fontSize:8, color:'#475569', fontFamily:"'Share Tech Mono',monospace", marginTop:2 }}>Fleet-wide health · PS §6.2</div>
         </div>
         <div className="flex gap-1">
           {VIEWS.map(v => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              className={`px-2 py-1 text-xs rounded transition-colors ${
-                view === v ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
-              }`}
-            >
-              {v.charAt(0).toUpperCase() + v.slice(1)}
+            <button key={v} onClick={()=>setView(v)} className="btn"
+              style={{ background:view===v?'rgba(59,130,246,0.25)':'rgba(10,25,55,0.6)', borderColor:view===v?'rgba(59,130,246,0.6)':'rgba(30,80,160,0.3)', color:view===v?'#93c5fd':'#475569' }}>
+              {v}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Summary stats strip */}
+      {/* Summary stats */}
       <div className="grid grid-cols-4 gap-2 flex-shrink-0">
-        {summaryStats.map(s => (
-          <div key={s.label} className="bg-gray-800/50 rounded p-2 text-center border border-gray-700/50">
-            <div className="text-lg font-bold" style={{ color: s.color }}>{s.value}</div>
-            <div className="text-gray-500 text-xs mt-0.5">{s.label}</div>
+        {[
+          { l:'MANEUVERS',   v:metrics.maneuvers_executed??0,                          col:'#3b82f6' },
+          { l:'AVOIDED',     v:metrics.collisions_avoided??0,                          col:'#10b981' },
+          { l:'FUEL USED',   v:`${(metrics.fuel_used_total_kg??0).toFixed(1)} kg`,     col:'#f59e0b' },
+          { l:'AVG UPTIME',  v:avgUptime !== '—' ? `${avgUptime}%` : '—',              col:'#8b5cf6' },
+        ].map(s => (
+          <div key={s.l} className="stat-card" style={{ color:s.col }}>
+            <div className="stat-val">{s.v}</div>
+            <div className="stat-label">{s.l}</div>
           </div>
         ))}
       </div>
 
-      {/* ── FUEL VIEW ─────────────────────────────────────────────────────────── */}
-      {view === 'fuel' && (
-        <div className="space-y-4">
-          {/* Per-satellite fuel gauges */}
-          <div className="bg-gray-800/40 rounded p-3 border border-gray-700/50">
-            <h4 className="text-gray-400 text-xs mb-3 tracking-widest">⛽ PROPELLANT BUDGET  (PS §5.1)</h4>
+      {/* ── FUEL VIEW ─────────────────────────────────────────────────────── */}
+      {view === 'Fuel' && (
+        <div className="space-y-3">
+          <div className="panel p-3">
+            <div className="panel-header" style={{ margin:'-12px -12px 12px', borderRadius:'4px 4px 0 0' }}>
+              <div className="panel-title" style={{ color:'#f59e0b' }}>⛽ PROPELLANT BUDGET · PS §5.1</div>
+              <div style={{ fontSize:8, color:'#475569', fontFamily:"'Share Tech Mono',monospace" }}>Isp=300s · g₀=9.807 m/s² · Tsiolkovsky</div>
+            </div>
             {satellites.length === 0
-              ? <div className="text-gray-600 text-xs text-center py-4">No satellite data — ingest telemetry first</div>
+              ? <div style={{ color:'#334155', fontSize:11, textAlign:'center', padding:'20px 0', fontFamily:"'Share Tech Mono',monospace" }}>No satellite data — ingest telemetry first</div>
               : satellites.map(s => <FuelGauge key={s.id} sat={s} />)
             }
           </div>
-
-          {/* Fuel bar chart */}
-          {fuelBarData.length > 0 && (
-            <div className="bg-gray-800/40 rounded p-3 border border-gray-700/50">
-              <h4 className="text-gray-400 text-xs mb-3 tracking-widest">📊 FUEL COMPARISON</h4>
-              <div className="h-48">
+          {fuelData.length > 0 && (
+            <div className="panel p-3">
+              <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:"'Orbitron',sans-serif", letterSpacing:'0.12em', marginBottom:8 }}>FUEL COMPARISON CHART</div>
+              <div style={{ height:160 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={fuelBarData} margin={{ top: 4, right: 4, left: 4, bottom: 4 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                    <XAxis dataKey="name" stroke="#4b5563" tick={{ fontSize: 9, fill: '#9ca3af' }} />
-                    <YAxis stroke="#4b5563" tick={{ fontSize: 9, fill: '#9ca3af' }} domain={[0, 50]} label={{ value: 'kg', angle: -90, position: 'insideLeft', fill: '#4b5563', fontSize: 9 }} />
-                    <Tooltip content={<CustomFuelTooltip />} />
-                    <Bar dataKey="fuel" radius={[2, 2, 0, 0]}>
-                      {fuelBarData.map((d, i) => (
-                        <Cell key={i} fill={fuelColor(d.pct)} />
-                      ))}
+                  <BarChart data={fuelData} margin={{ top:4, right:4, left:0, bottom:4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(30,80,160,0.15)" />
+                    <XAxis dataKey="name" stroke="#334155" tick={{ fontSize:8, fill:'#475569', fontFamily:"'Share Tech Mono',monospace" }} />
+                    <YAxis stroke="#334155" tick={{ fontSize:8, fill:'#475569' }} domain={[0,50]} />
+                    <Tooltip {...TT} formatter={(v)=>[`${v.toFixed(2)} kg`,'Fuel']} />
+                    <Bar dataKey="fuel" radius={[2,2,0,0]}>
+                      {fuelData.map((d,i) => <Cell key={i} fill={fc(d.pct)} />)}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
@@ -198,80 +143,71 @@ const TelemetryHeatmap = ({ satellites = [], metrics = {} }) => {
         </div>
       )}
 
-      {/* ── EFFICIENCY VIEW ───────────────────────────────────────────────────── */}
-      {view === 'efficiency' && (
-        <div className="space-y-4">
-          <div className="bg-gray-800/40 rounded p-3 border border-gray-700/50">
-            <h4 className="text-gray-400 text-xs mb-3 tracking-widest">🎯 ΔV COST vs COLLISIONS AVOIDED  (PS §6.2)</h4>
-            <div className="grid grid-cols-3 gap-3 mb-4">
-              {[
-                { label: 'Fuel Used', value: `${(metrics.fuel_used_total_kg ?? 0).toFixed(2)} kg`, col: '#f59e0b' },
-                { label: 'Avoided',   value: metrics.collisions_avoided ?? 0, col: '#10b981' },
-                { label: 'Efficiency', value: `${efficiencyData[0].efficiency.toFixed(1)}%`, col: '#8b5cf6' },
-              ].map(s => (
-                <div key={s.label} className="bg-gray-900 rounded p-3 text-center border border-gray-700/40">
-                  <div className="text-xl font-bold" style={{ color: s.col }}>{s.value}</div>
-                  <div className="text-gray-500 text-xs mt-1">{s.label}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* ΔV efficiency scatter: fuel used vs uptime per satellite */}
-            {dvScatterData.length > 0 && (
-              <>
-                <h4 className="text-gray-400 text-xs mb-2">Fuel Used vs Uptime per Satellite</h4>
-                <div className="h-48">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ScatterChart margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
-                      <XAxis dataKey="fuelUsed" name="Fuel Used (kg)" stroke="#4b5563" tick={{ fontSize: 9, fill: '#9ca3af' }} label={{ value: 'Fuel Used (kg)', position: 'bottom', fill: '#4b5563', fontSize: 9 }} />
-                      <YAxis dataKey="uptime"   name="Uptime %" stroke="#4b5563" tick={{ fontSize: 9, fill: '#9ca3af' }} domain={[0, 100]} label={{ value: 'Uptime %', angle: -90, position: 'insideLeft', fill: '#4b5563', fontSize: 9 }} />
-                      <ZAxis range={[40, 120]} />
-                      <Tooltip cursor={{ strokeDasharray: '3 3' }} formatter={(v, n) => [typeof v === 'number' ? v.toFixed(2) : v, n]} />
-                      <Scatter data={dvScatterData} fill="#3b82f6" opacity={0.8} />
-                    </ScatterChart>
-                  </ResponsiveContainer>
-                </div>
-              </>
-            )}
+      {/* ── EFFICIENCY VIEW ────────────────────────────────────────────────── */}
+      {view === 'Efficiency' && (
+        <div className="panel p-3 space-y-4">
+          <div style={{ fontSize:12, color:'var(--yellow)', fontFamily:"'Orbitron',sans-serif", letterSpacing:'0.12em' }}>ΔV COST vs COLLISIONS AVOIDED</div>
+          <div className="grid grid-cols-3 gap-2">
+            {[
+              { l:'Fuel Used',   v:`${(metrics.fuel_used_total_kg??0).toFixed(2)} kg`, col:'#f59e0b' },
+              { l:'Avoided',     v:metrics.collisions_avoided??0,                       col:'#10b981' },
+              { l:'Avoid Rate',  v:`${avoidRate}%`,                                     col:'#8b5cf6' },
+            ].map(s => (
+              <div key={s.l} className="stat-card" style={{ color:s.col }}>
+                <div className="stat-val" style={{ fontSize:24 }}>{s.v}</div>
+                <div className="stat-label">{s.l}</div>
+              </div>
+            ))}
           </div>
+          {scatterData.length > 0 && (
+            <>
+              <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:"'Share Tech Mono',monospace" }}>Fuel Consumed vs Station-Keeping Uptime per Satellite</div>
+              <div style={{ height:160 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <ScatterChart margin={{ top:8, right:8, bottom:8, left:8 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(30,80,160,0.15)" />
+                    <XAxis dataKey="fuelUsed" name="Fuel Used (kg)" stroke="#334155" tick={{ fontSize:8, fill:'#475569' }} label={{ value:'Fuel Used (kg)', position:'bottom', fill:'#334155', fontSize:8 }} />
+                    <YAxis dataKey="uptime" name="Uptime %" stroke="#334155" tick={{ fontSize:8, fill:'#475569' }} domain={[0,100]} label={{ value:'Uptime%', angle:-90, position:'insideLeft', fill:'#334155', fontSize:8 }} />
+                    <ZAxis range={[40,120]} />
+                    <Tooltip {...TT} formatter={(v,n)=>[typeof v==='number'?v.toFixed(2):v, n]} />
+                    <Scatter data={scatterData} fill="#3b82f6" opacity={0.8} />
+                  </ScatterChart>
+                </ResponsiveContainer>
+              </div>
+            </>
+          )}
         </div>
       )}
 
-      {/* ── UPTIME VIEW ───────────────────────────────────────────────────────── */}
-      {view === 'uptime' && (
-        <div className="space-y-4">
-          <div className="bg-gray-800/40 rounded p-3 border border-gray-700/50">
-            <h4 className="text-gray-400 text-xs mb-3 tracking-widest">📡 CONSTELLATION UPTIME RADAR  (PS §5.2)</h4>
-            {uptimeData.length > 0 ? (
-              <div className="h-64">
-                <ResponsiveContainer width="100%" height="100%">
-                  <RadarChart data={uptimeData} outerRadius="80%">
-                    <PolarGrid stroke="#1f2937" />
-                    <PolarAngleAxis dataKey="subject" stroke="#4b5563" tick={{ fill: '#9ca3af', fontSize: 10 }} />
-                    <PolarRadiusAxis angle={30} domain={[0, 100]} stroke="#4b5563" tick={{ fill: '#6b7280', fontSize: 8 }} />
-                    <Radar name="Uptime %" dataKey="uptime" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.35} />
-                    <Tooltip formatter={v => [`${v.toFixed(1)}%`, 'Uptime']} />
-                  </RadarChart>
-                </ResponsiveContainer>
-              </div>
-            ) : (
-              <div className="text-gray-600 text-xs text-center py-8">Run simulation to generate uptime data</div>
-            )}
-          </div>
-
-          {/* Uptime table */}
-          {Object.keys(metrics.satellite_uptime_pct || {}).length > 0 && (
-            <div className="bg-gray-800/40 rounded p-3 border border-gray-700/50 max-h-48 overflow-y-auto">
-              <h4 className="text-gray-400 text-xs mb-2 tracking-widest">UPTIME TABLE</h4>
-              {Object.entries(metrics.satellite_uptime_pct).map(([id, pct]) => (
-                <div key={id} className="flex justify-between items-center py-1 border-b border-gray-800">
-                  <span className="text-xs font-mono text-gray-300">{id}</span>
+      {/* ── UPTIME VIEW ────────────────────────────────────────────────────── */}
+      {view === 'Uptime' && (
+        <div className="panel p-3 space-y-3">
+          <div style={{ fontSize:12, color:'var(--cyan)', fontFamily:"'Orbitron',sans-serif", letterSpacing:'0.12em' }}>CONSTELLATION UPTIME RADAR</div>
+          {uptimeData.length > 0 ? (
+            <div style={{ height:220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <RadarChart data={uptimeData} outerRadius="80%">
+                  <PolarGrid stroke="rgba(30,80,160,0.2)" />
+                  <PolarAngleAxis dataKey="subject" stroke="#334155" tick={{ fill:'#6b7280', fontSize:9, fontFamily:"'Share Tech Mono',monospace" }} />
+                  <PolarRadiusAxis angle={30} domain={[0,100]} stroke="#334155" tick={{ fill:'#4b5563', fontSize:8 }} />
+                  <Radar name="Uptime %" dataKey="uptime" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.3} />
+                  <Tooltip {...TT} formatter={v=>[`${v.toFixed(1)}%`,'Uptime']} />
+                </RadarChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div style={{ color:'#334155', fontSize:11, textAlign:'center', padding:'20px 0', fontFamily:"'Share Tech Mono',monospace" }}>Run simulation to generate uptime data</div>
+          )}
+          {Object.keys(metrics.satellite_uptime_pct||{}).length > 0 && (
+            <div style={{ maxHeight:180, overflowY:'auto' }}>
+              {Object.entries(metrics.satellite_uptime_pct).map(([id,pct])=>(
+                <div key={id} className="hud-row">
+                  <span className="hud-label">{id}</span>
                   <div className="flex items-center gap-2">
-                    <div className="w-20 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-                      <div className="h-full rounded-full" style={{ width: `${pct}%`, background: pct > 90 ? '#10b981' : pct > 70 ? '#f59e0b' : '#ef4444' }} />
+                    <div style={{ width:60, height:4, background:'rgba(30,80,160,0.2)', borderRadius:2, overflow:'hidden' }}>
+                      <div style={{ width:`${pct}%`, height:'100%', background:pct>90?'#10b981':pct>70?'#f59e0b':'#ef4444', borderRadius:2 }} />
                     </div>
-                    <span className="text-xs font-mono" style={{ color: pct > 90 ? '#10b981' : pct > 70 ? '#f59e0b' : '#ef4444' }}>{pct.toFixed(1)}%</span>
+                    <span style={{ color:pct>90?'#10b981':pct>70?'#f59e0b':'#ef4444', fontSize:10, fontFamily:"'Orbitron',monospace" }}>{pct.toFixed(1)}%</span>
                   </div>
                 </div>
               ))}
@@ -280,46 +216,39 @@ const TelemetryHeatmap = ({ satellites = [], metrics = {} }) => {
         </div>
       )}
 
-      {/* ── HISTORY VIEW ──────────────────────────────────────────────────────── */}
-      {view === 'history' && (
-        <div className="space-y-4">
-          <div className="bg-gray-800/40 rounded p-3 border border-gray-700/50">
-            <h4 className="text-gray-400 text-xs mb-1 tracking-widest">📊 MISSION SUMMARY</h4>
-            <div className="space-y-2 mt-3">
-              {[
-                { label: 'Safety Score',      value: `${(metrics.collisions_avoided ?? 0)} avoided`, note: 'PS §7 — 25% weight', col: '#10b981' },
-                { label: 'Fuel Efficiency',   value: `${(metrics.fuel_used_total_kg ?? 0).toFixed(2)} kg used`, note: 'PS §7 — 20% weight', col: '#f59e0b' },
-                { label: 'Uptime',            value: uptimeData.length > 0 ? `${(uptimeData.reduce((s, d) => s + d.uptime, 0) / uptimeData.length).toFixed(1)}% avg` : '—', note: 'PS §7 — 15% weight', col: '#3b82f6' },
-                { label: 'Maneuvers Executed',value: metrics.maneuvers_executed ?? 0, note: 'PS §7 — Algo Speed', col: '#8b5cf6' },
-              ].map(row => (
-                <div key={row.label} className="flex justify-between items-center py-2 border-b border-gray-800/60">
-                  <div>
-                    <div className="text-xs text-gray-300 font-bold">{row.label}</div>
-                    <div className="text-gray-600 text-xs">{row.note}</div>
+      {/* ── SCORE VIEW ─────────────────────────────────────────────────────── */}
+      {view === 'Score' && (
+        <div className="panel p-4 space-y-3">
+          <div style={{ fontSize:12, color:'var(--purple)', fontFamily:"'Orbitron',sans-serif", letterSpacing:'0.12em' }}>MISSION EVALUATION</div>
+          {[
+            { l:'Safety Score (25%)',      v:`${metrics.collisions_avoided??0} conjunctions avoided`,            col:'#10b981' },
+            { l:'Fuel Efficiency (20%)',   v:`${(metrics.fuel_used_total_kg??0).toFixed(2)} kg ΔV consumed`,     col:'#f59e0b' },
+            { l:'Constellation Uptime (15%)', v:avgUptime!=='—'?`${avgUptime}% fleet average`:'Run simulation', col:'#3b82f6' },
+            { l:'Algorithmic Speed (15%)', v:`${metrics.maneuvers_executed??0} maneuvers executed`,             col:'#06b6d4' },
+          ].map(row => (
+            <div key={row.l} className="hud-row" style={{ padding:'8px 0' }}>
+              <div>
+                <div style={{ fontSize:10, color:'#cbd5e1', fontFamily:"'Share Tech Mono',monospace" }}>{row.l}</div>
+              </div>
+              <div style={{ fontSize:11, fontWeight:'bold', color:row.col, fontFamily:"'Orbitron',monospace" }}>{row.v}</div>
+            </div>
+          ))}
+          <div style={{ textAlign:'center', paddingTop:12 }}>
+            {(() => {
+              const score = Math.min(100, Math.round(((metrics.collisions_avoided??0)/Math.max(metrics.maneuvers_executed??1,1))*100));
+              return (
+                <>
+                  <div style={{ fontSize:52, fontWeight:900, color:'#8b5cf6', fontFamily:"'Orbitron',sans-serif", textShadow:'0 0 30px rgba(139,92,246,0.5)' }}>{score}</div>
+                  <div style={{ fontSize:11, color:'var(--text-muted)', fontFamily:"'Orbitron',monospace", letterSpacing:'0.2em' }}>EFFICIENCY SCORE / 100</div>
+                  <div style={{ width:'100%', height:6, background:'rgba(30,50,100,0.4)', borderRadius:3, marginTop:8, overflow:'hidden' }}>
+                    <div style={{ width:`${score}%`, height:'100%', background:'linear-gradient(90deg,#6d28d9,#8b5cf6)', borderRadius:3, transition:'width 0.8s ease', boxShadow:'0 0 10px rgba(139,92,246,0.5)' }} />
                   </div>
-                  <div className="text-sm font-bold font-mono" style={{ color: row.col }}>{row.value}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Efficiency score */}
-            <div className="mt-4 text-center">
-              <div className="text-5xl font-bold text-purple-400">
-                {Math.min(100, Math.round(((metrics.collisions_avoided ?? 0) / Math.max(metrics.maneuvers_executed ?? 1, 1)) * 100))}
-              </div>
-              <div className="text-gray-500 text-xs mt-1">EFFICIENCY SCORE / 100</div>
-              <div className="w-full h-2.5 bg-gray-800 rounded-full mt-2 overflow-hidden">
-                <div
-                  className="h-full bg-purple-500 rounded-full transition-all duration-700"
-                  style={{ width: `${Math.min(100, ((metrics.collisions_avoided ?? 0) / Math.max(metrics.maneuvers_executed ?? 1, 1)) * 100)}%` }}
-                />
-              </div>
-            </div>
+                </>
+              );
+            })()}
           </div>
         </div>
       )}
     </div>
   );
-};
-
-export default TelemetryHeatmap;
+}

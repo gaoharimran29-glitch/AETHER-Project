@@ -1,97 +1,42 @@
-version: "3.9"
-
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # AETHER — Docker Compose
-# Runs: Redis + Backend API + Frontend dev server
+# National Space Hackathon 2026, IIT Delhi
 #
-# Commands:
-#   docker compose up --build          build + start all
-#   docker compose up -d --build       background
-#   docker compose logs -f backend     follow API logs
-#   docker compose down                stop
-# ─────────────────────────────────────────────────────────────────────────────
+# Usage:
+#   docker compose up --build          # build and start
+#   docker compose up --build -d       # detached (background)
+#   docker compose down                # stop and remove containers
+#   docker compose logs -f             # follow logs
+#
+# After starting, the system is available at:
+#   API:       http://localhost:8000/api/status
+#   Dashboard: http://localhost:8000/
+# =============================================================================
 
 services:
-
-  # ── Redis ────────────────────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    container_name: aether_redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    command: redis-server --save "" --loglevel warning
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
-    networks:
-      - aether_net
-
-  # ── Backend API ──────────────────────────────────────────────────────────
-  backend:
+  aether:
     build:
-      context: ./backend         # backend/ folder at repo root
+      context: .
       dockerfile: Dockerfile
-    container_name: aether_backend
-    restart: unless-stopped
+    container_name: aether
     ports:
-      - "8000:8000"
+      - "8000:8000"       # PS §8 — grading scripts connect here
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
       - PYTHONUNBUFFERED=1
-    depends_on:
-      redis:
-        condition: service_healthy
-    # Override entrypoint.sh — Redis is separate service here
-    command: >
-      uvicorn main:app
-      --host 0.0.0.0
-      --port 8000
-      --workers 1
-      --log-level info
-    volumes:
-      - ./backend:/app
-    networks:
-      - aether_net
+      - PYTHONDONTWRITEBYTECODE=1
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/status"]
-      interval: 10s
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/status"]
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  # ── Frontend (CRA dev server) ─────────────────────────────────────────────
-  # Serves on port 3000, proxies /api/* to backend:8000 via package.json proxy
-  frontend:
-    image: node:18-alpine
-    container_name: aether_frontend
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
-    working_dir: /app
-    ports:
-      - "3000:3000"
-    environment:
-      - CHOKIDAR_USEPOLLING=true   # needed for hot-reload inside Docker
-      - WDS_SOCKET_PORT=0          # fix WebSocket port for CRA
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules          # don't overwrite container node_modules
-    command: sh -c "npm install && npm start"
-    depends_on:
-      backend:
-        condition: service_healthy
-    networks:
-      - aether_net
-
-volumes:
-  redis_data:
-    driver: local
-
-networks:
-  aether_net:
-    driver: bridge
+    # Resource limits — keep image lean and predictable
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: '2.0'
+        reservations:
+          memory: 512m
+          cpus: '0.5'
