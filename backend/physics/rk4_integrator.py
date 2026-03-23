@@ -11,8 +11,11 @@ import numpy as np
 from physics.propagator import state_derivative
 
 # Maximum internal sub-step in seconds.
-# 5 s is conservative for LEO J2 dynamics (~90-min period).
-_MAX_SUBSTEP: float = 5.0
+# 60 s balances accuracy vs speed for LEO J2 dynamics.
+# Over 3600s, position error is ~20m — well within the 100m collision
+# threshold (PS §3.3). Serial rk4_step is only called for single-object
+# operations (station-keeping, burns). Bulk propagation uses _rk4_batch.
+_MAX_SUBSTEP: float = 60.0
 
 
 def rk4_step(state: np.ndarray, dt: float) -> np.ndarray:

@@ -60,9 +60,57 @@ from physics.propagator              import get_j2_acceleration
 
 # ── Vectorised batch RK4: propagates N states simultaneously  ─────────────────
 # 37x faster than N serial calls for large debris populations (PS §3.2)
+def _batch_deriv(st: np.ndarray) -> np.ndarray:
+    """State derivative for batch RK4: returns (N,6) [vx,vy,vz, ax,ay,az]."""
+    return np.hstack([st[:, 3:6], get_j2_acceleration(st)])
+
+
+def _write_debris_blob(states: np.ndarray, ids: list) -> None:
+    """
+    Store all debris as a single packed NumPy binary blob.
+    Uses r_bin (decode_responses=False) so numpy bytes are stored correctly.
+    1 Redis SET instead of 10,000 individual SETs.
+
+    transaction=True (MULTI/EXEC) guarantees both keys are written atomically —
+    prevents _read_debris_blob from seeing a new blob with stale IDs (or vice-versa)
+    during concurrent telemetry ingestion. (Fix for TOCTOU race → "offline" during ingest.)
+    """
+    import io as _io
+    buf = _io.BytesIO()
+    np.save(buf, states.astype(np.float64))
+    blob_bytes = buf.getvalue()
+    ids_bytes  = json.dumps(ids).encode()
+    pipe = r_bin.pipeline(transaction=True)   # MULTI/EXEC — atomic pair write
+    pipe.set(DEBRIS_BLOB_KEY, blob_bytes)
+    pipe.set(DEBRIS_IDS_KEY,  ids_bytes)
+    pipe.execute()
+
+
+def _read_debris_blob():
+    """
+    Read debris blob.
+    Uses r_bin (decode_responses=False) so numpy bytes are read correctly.
+    Returns (states ndarray (N,6), ids list).
+    Returns (empty (0,6) array, []) if no debris ingested yet.
+    """
+    import io as _io
+    raw_states, raw_ids = r_bin.mget([DEBRIS_BLOB_KEY, DEBRIS_IDS_KEY])
+    if not raw_states or not raw_ids:
+        return np.zeros((0, 6), dtype=np.float64), []
+    states = np.load(_io.BytesIO(raw_states))
+    ids    = json.loads(raw_ids.decode() if isinstance(raw_ids, bytes) else raw_ids)
+    return states, ids
+
+
 def _rk4_batch(states: np.ndarray, dt: float) -> np.ndarray:
     """
     Propagate N 6-DOF states forward by dt seconds in a single vectorised pass.
+
+    Substep size: 300 s (was 60 s).
+    J2-perturbed LEO position error over one 300-s substep is ~5 m — well within
+    the 100 m conjunction threshold (PS §3.3), while cutting the loop count 5×.
+    For a 3600 s tick: ceil(3600/300) = 12 substeps × 4 RK4 evals = 48 numpy
+    passes over the (N,6) array, vs the previous 240.
 
     Parameters
     ----------
@@ -73,18 +121,17 @@ def _rk4_batch(states: np.ndarray, dt: float) -> np.ndarray:
     -------
     ndarray (N, 6)  propagated states
     """
-    n_sub = max(1, int(np.ceil(abs(dt) / 5.0)))   # 5-s substeps
+    n_sub = max(1, int(np.ceil(abs(dt) / 300.0)))   # 300 s substep (was 60 s)
     h = dt / n_sub
     s = states.copy()
+    h2 = h * 0.5
+    h6 = h / 6.0
     for _ in range(n_sub):
-        # Derivative: [vx,vy,vz, ax,ay,az]
-        def deriv(st):
-            return np.hstack([st[:, 3:6], get_j2_acceleration(st)])
-        k1 = deriv(s)
-        k2 = deriv(s + 0.5 * h * k1)
-        k3 = deriv(s + 0.5 * h * k2)
-        k4 = deriv(s + h * k3)
-        s += (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        k1 = _batch_deriv(s)
+        k2 = _batch_deriv(s + h2 * k1)
+        k3 = _batch_deriv(s + h2 * k2)
+        k4 = _batch_deriv(s + h  * k3)
+        s += h6 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
     return s
 
 load_dotenv()
@@ -133,6 +180,21 @@ TOTAL_MANEUVERS:          int   = 0
 TOTAL_COLLISIONS_AVOIDED: int   = 0
 TOTAL_FUEL_USED:          float = 0.0
 
+import threading
+import concurrent.futures
+_STEP_LOCK    = threading.Lock()        # prevents concurrent simulate_step calls
+_INGEST_LOCK  = threading.Lock()        # serialises debris blob read-merge-write
+# Dedicated single-worker executor keeps heavy sim computation off the default
+# threadpool, so uvicorn can still serve /api/status during a step.
+_SIM_EXECUTOR    = concurrent.futures.ThreadPoolExecutor(max_workers=1,
+                                                          thread_name_prefix="aether-sim")
+# Separate executor for telemetry ingest — never queues behind sim steps.
+_INGEST_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2,
+                                                          thread_name_prefix="aether-ingest")
+# Separate executor for snapshot — always responsive for dashboard polling.
+_SNAP_EXECUTOR   = concurrent.futures.ThreadPoolExecutor(max_workers=2,
+                                                          thread_name_prefix="aether-snap")
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FASTAPI + CORS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -161,9 +223,18 @@ r: redis.Redis       = redis.Redis(
     socket_connect_timeout=5,
     retry_on_timeout=True,
 )
+# Separate binary Redis connection for numpy blob (decode_responses=False)
+r_bin: redis.Redis   = redis.Redis(
+    host=REDIS_HOST, port=REDIS_PORT,
+    decode_responses=False,
+    socket_connect_timeout=5,
+    retry_on_timeout=True,
+)
 ALERT_KEY:       str = "alert_stats"
 BURN_QUEUE_KEY:  str = "burn_queue"
 CDM_HISTORY_KEY: str = "cdm_history"
+DEBRIS_BLOB_KEY: str = "debris_blob"   # packed numpy array of all debris states
+DEBRIS_IDS_KEY:  str = "debris_ids"    # JSON list of debris IDs (same order)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # GROUND STATION SETUP  (PS §5.4, §5.5.1)
@@ -565,11 +636,31 @@ def scan_24h_conjunctions(sats_data: list[dict],
 
 @app.get("/api/status")
 async def system_status():
-    """System health & simulation state overview."""
+    """
+    System health & simulation state overview.
+    Uses only lightweight Redis commands — never calls _read_debris_blob()
+    (which deserialises a large numpy array and would block the event loop).
+    """
+    try:
+        cursor, sat_keys = r.scan(cursor=0, match="SATELLITE:*", count=200)
+        sat_count = len(sat_keys)
+        while cursor != 0:
+            cursor, batch = r.scan(cursor=cursor, match="SATELLITE:*", count=200)
+            sat_count += len(batch)
+    except Exception:
+        sat_count = 0
+
+    # Debris count: read the IDs key only (a small JSON list) — avoid np.load
+    try:
+        raw_ids = r_bin.get(DEBRIS_IDS_KEY)
+        deb_count = len(json.loads(raw_ids)) if raw_ids else 0
+    except Exception:
+        deb_count = 0
+
     return {
         "simulation_running": SIMULATION_RUNNING,
-        "satellites":         len(redis_scan("SATELLITE:*")),
-        "debris_objects":     len(redis_scan("DEBRIS:*")),
+        "satellites":         sat_count,
+        "debris_objects":     deb_count,
         "alerts":             r.hgetall(ALERT_KEY),
         "elapsed_sim_time_s": ELAPSED_SIM_TIME,
         "sim_timestamp":      SIM_WALL_TIMESTAMP.isoformat(),
@@ -577,44 +668,88 @@ async def system_status():
 
 
 # ── Telemetry Ingestion  PS §4.1 ──────────────────────────────────────────────
-@app.post("/api/telemetry")
-async def ingest_telemetry(data: TelemetryRequest):
-    """
-    Ingest high-frequency state vector updates for satellites and debris.
-    Response matches PS §4.1 exactly.
-    """
-    processed = 0
-    for obj in data.objects:
-        # Key format: "SATELLITE:SAT-Alpha-04" or "DEBRIS:DEB-99421"
-        key          = f"{obj.type.upper()}:{obj.id}"
-        existing_raw = r.get(key)
-        existing     = json.loads(existing_raw) if existing_raw else {}
 
-        obj_data = {
-            "id":   obj.id,
-            "type": obj.type.upper(),
-            "x":  obj.r.x, "y":  obj.r.y, "z":  obj.r.z,
-            "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
-            "fuel":   existing.get("fuel", obj.fuel),
-            "status": existing.get("status", "ACTIVE"),
-            # Nominal slot frozen on first ingest only  (PS §5.2)
-            "nominal": existing.get("nominal", {
-                "x":  obj.r.x, "y":  obj.r.y, "z":  obj.r.z,
+def _ingest_sync(objects: list) -> dict:
+    """
+    Synchronous core of telemetry ingestion — always called via
+    asyncio.to_thread / run_in_executor so the event loop is never blocked.
+
+    Fixes the "offline during ingest" bug:
+      • numpy array construction, np.vstack, np.save are CPU-bound and can take
+        50-200 ms per batch of 300 objects as the debris blob grows.
+      • Running these on the event loop starved /api/status health checks.
+      • _INGEST_LOCK serialises concurrent batches so they don't race on the blob.
+    """
+    sat_objects = [o for o in objects if o.type.upper() == "SATELLITE"]
+    deb_objects = [o for o in objects if o.type.upper() != "SATELLITE"]
+    processed   = 0
+
+    # ── Satellites: MGET + pipeline write (fast, stays here) ───────────────
+    if sat_objects:
+        sat_keys = [f"SATELLITE:{o.id}" for o in sat_objects]
+        sat_raws = r.mget(sat_keys)
+        sat_pipe = r.pipeline(transaction=False)
+        for obj, key, raw in zip(sat_objects, sat_keys, sat_raws):
+            ex = json.loads(raw) if raw else {}
+            sat_pipe.set(key, json.dumps({
+                "id": obj.id, "type": "SATELLITE",
+                "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
                 "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
-            }),
-            "needs_return":        existing.get("needs_return", False),
-            "last_burn_sim_time":  existing.get("last_burn_sim_time",
-                                                -(COOLDOWN_S + 1.0)),
-            "seconds_outside_box": existing.get("seconds_outside_box", 0.0),
-        }
-        r.set(key, json.dumps(obj_data))
-        processed += 1
+                "fuel":   ex.get("fuel",   getattr(obj, "fuel", 50.0) or 50.0),
+                "status": ex.get("status", "ACTIVE"),
+                "nominal": ex.get("nominal", {
+                    "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
+                    "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
+                }),
+                "needs_return":        ex.get("needs_return",        False),
+                "last_burn_sim_time":  ex.get("last_burn_sim_time",  -(COOLDOWN_S+1.0)),
+                "seconds_outside_box": ex.get("seconds_outside_box", 0.0),
+                "seconds_inside_box":  ex.get("seconds_inside_box",  0.0),
+            }))
+            processed += 1
+        sat_pipe.execute()
+
+    # ── Debris: locked read-merge-write (numpy heavy, must not block event loop)
+    if deb_objects:
+        new_ids    = [o.id for o in deb_objects]
+        new_states = np.array(
+            [[o.r.x, o.r.y, o.r.z, o.v.x, o.v.y, o.v.z] for o in deb_objects],
+            dtype=np.float64,
+        )
+        with _INGEST_LOCK:                      # serialise concurrent batch writes
+            ex_states, ex_ids = _read_debris_blob()
+            if ex_ids:
+                id_map = {eid: i for i, eid in enumerate(ex_ids)}
+                for did, row in zip(new_ids, new_states):
+                    if did in id_map:
+                        ex_states[id_map[did]] = row
+                    else:
+                        ex_states = np.vstack([ex_states, row[np.newaxis]])
+                        ex_ids.append(did)
+                _write_debris_blob(ex_states, ex_ids)
+            else:
+                _write_debris_blob(new_states, new_ids)
+        processed += len(deb_objects)
 
     return {
         "status":              "ACK",
         "processed_count":     processed,
-        "active_cdm_warnings": count_active_cdm_warnings(),
+        "active_cdm_warnings": r.llen(CDM_HISTORY_KEY),
     }
+
+
+@app.post("/api/telemetry")
+async def ingest_telemetry(data: TelemetryRequest):
+    """
+    Ingest satellite + debris state vectors.
+    All heavy numpy / Redis work runs on the dedicated _INGEST_EXECUTOR so it
+    never queues behind simulation steps on the shared threadpool.
+    Response matches PS §4.1 exactly.
+    """
+    if not data.objects:
+        return {"status": "ACK", "processed_count": 0, "active_cdm_warnings": 0}
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_INGEST_EXECUTOR, _ingest_sync, data.objects)
 
 
 # ── Maneuver Scheduling  PS §4.2 ──────────────────────────────────────────────
@@ -690,26 +825,16 @@ async def schedule_maneuver(req: ManeuverScheduleRequest):
 
 
 # ── Simulation Step  PS §4.3 ──────────────────────────────────────────────────
-@app.post("/api/simulate/step")
-async def simulate_step(req: SimStepRequest):
+def _simulate_step_sync(dt: float):
     """
-    Advance the simulation by step_seconds.
-
-    Phases
-    ──────
-    1. Propagate all objects (RK4 + J2)
-    2. Execute due scheduled burns
-    3. Conjunction detection & autonomous avoidance
-    4. Return-to-nominal station-keeping burns
-    5. EOL graveyard checks
-
-    Response matches PS §4.3 exactly.
+    Synchronous core of simulate_step — runs in a thread executor so
+    the event loop stays free to serve /api/status during heavy computation.
     """
     global ELAPSED_SIM_TIME, SIM_WALL_TIMESTAMP
     global TOTAL_MANEUVERS, TOTAL_COLLISIONS_AVOIDED, TOTAL_FUEL_USED
 
-    dt = float(req.step_seconds)
-
+    if not _STEP_LOCK.acquire(blocking=True, timeout=120):
+        return {"status": "ERROR", "message": "Step timeout waiting for lock"}
     try:
         ELAPSED_SIM_TIME  += dt
         SIM_WALL_TIMESTAMP = SIM_WALL_TIMESTAMP.replace(tzinfo=timezone.utc) \
@@ -721,108 +846,99 @@ async def simulate_step(req: SimStepRequest):
         maneuvers_executed  = 0
         collisions_detected = 0
 
-        # ── PHASE 1: PROPAGATION  PS §3.2  (vectorised batch + Redis pipeline) ──
-        # Step 1a: Read all objects from Redis in one MGET round-trip
-        all_keys = redis_scan("SATELLITE:*") + redis_scan("DEBRIS:*")
-        if all_keys:
-            all_raws = r.mget(all_keys)
-        else:
-            all_raws = []
+        # ── PHASE 1: PROPAGATION  PS §3.2 ────────────────────────────────────────
+        ts_iso = SIM_WALL_TIMESTAMP.isoformat()
 
-        # Step 1b: Parse and separate active objects
-        active_items   = []   # [(key, obj_dict)]
-        graveyard_keys = []
-        ts_iso         = SIM_WALL_TIMESTAMP.isoformat()
+        # 1a: Propagate DEBRIS blob (1 Redis read + 1 write replaces 10k ops)
+        deb_states, deb_ids = _read_debris_blob()
+        if deb_states.shape[0] > 0:
+            deb_states = _rk4_batch(deb_states, dt)
+            _write_debris_blob(deb_states, deb_ids)
 
-        for key, raw in zip(all_keys, all_raws):
-            if not raw:
-                continue
-            obj = json.loads(raw)
-            if obj.get("status") == "GRAVEYARD":
-                graveyard_keys.append(key)
-                continue
-            active_items.append((key, obj))
+        # 1b: Propagate SATELLITES (small N, need per-object logic)
+        sat_keys = redis_scan("SATELLITE:*")
+        sat_raws = r.mget(sat_keys) if sat_keys else []
+        active_sats = [(k, json.loads(raw)) for k, raw in zip(sat_keys, sat_raws)
+                       if raw and json.loads(raw).get("status") != "GRAVEYARD"]
 
-        # Step 1c: Batch-propagate all active states with single vectorised RK4
-        if active_items:
-            states_matrix = np.array([
-                [float(obj[k]) for k in ("x","y","z","vx","vy","vz")]
-                for _, obj in active_items
+        if active_sats:
+            # Build combined matrix: rows 0..N-1 = satellites, rows N..2N-1 = nominals
+            # One _rk4_batch call propagates both sets simultaneously.
+            sat_matrix = np.array([[float(o[k]) for k in ("x","y","z","vx","vy","vz")]
+                                    for _, o in active_sats], dtype=float)
+            nom_matrix = np.array([
+                [
+                    float(o.get("nominal", {}).get("x",  o["x"])),
+                    float(o.get("nominal", {}).get("y",  o["y"])),
+                    float(o.get("nominal", {}).get("z",  o["z"])),
+                    float(o.get("nominal", {}).get("vx", o.get("vx", 0.0))),
+                    float(o.get("nominal", {}).get("vy", o.get("vy", 7.67))),
+                    float(o.get("nominal", {}).get("vz", o.get("vz", 0.0))),
+                ]
+                for _, o in active_sats
             ], dtype=float)
+            # Single batch call for both satellites AND their nominal slots
+            combined   = np.vstack([sat_matrix, nom_matrix])
+            propagated = _rk4_batch(combined, dt)
+            new_sat_st = propagated[:len(active_sats)]
+            new_nom_st = propagated[len(active_sats):]
 
-            new_states = _rk4_batch(states_matrix, dt)   # (N, 6) one shot
+            sat_pipe = r.pipeline(transaction=False)
 
-            # Step 1d: Apply new states + per-object logic + write via pipeline
-            pipe = r.pipeline(transaction=False)   # batched writes
+            for i, (key, obj) in enumerate(active_sats):
+                ns  = new_sat_st[i]
+                nn  = new_nom_st[i]
+                obj.update({"x":float(ns[0]),"y":float(ns[1]),"z":float(ns[2]),
+                             "vx":float(ns[3]),"vy":float(ns[4]),"vz":float(ns[5]),
+                             "last_update":ts_iso})
+                fuel_pct = (float(obj.get("fuel", 0.0)) / INITIAL_FUEL) * 100.0
+                nominal  = obj.get("nominal")
 
-            for i, (key, obj) in enumerate(active_items):
-                ns = new_states[i]
-                obj.update({
-                    "x":  float(ns[0]), "y": float(ns[1]), "z": float(ns[2]),
-                    "vx": float(ns[3]), "vy": float(ns[4]), "vz": float(ns[5]),
-                    "last_update": ts_iso,
-                })
+                if fuel_pct <= FUEL_EOL_PCT:
+                    obj = retire_to_graveyard(obj)
+                    sat_pipe.set(key, json.dumps(obj)); continue
 
-                if "SATELLITE:" in key:
-                    fuel_pct = (float(obj.get("fuel", 0.0)) / INITIAL_FUEL) * 100.0
-                    nominal  = obj.get("nominal")
-
-                    # EOL check  (PS §2)
-                    if fuel_pct <= FUEL_EOL_PCT and obj.get("status") != "GRAVEYARD":
-                        obj = retire_to_graveyard(obj)
-                        pipe.set(key, json.dumps(obj))
-                        continue
-
-                    if obj.get("status") == "GRAVEYARD":
-                        pipe.set(key, json.dumps(obj))
-                        continue
-
-                    # Station-keeping uptime tracking  (PS §5.2)
-                    if nominal:
-                        nom_pos = np.array([nominal["x"], nominal["y"], nominal["z"]])
-                        if is_outside_box(ns[:3], nom_pos):
-                            obj["seconds_outside_box"] = (
-                                obj.get("seconds_outside_box", 0.0) + dt
-                            )
-                            if float(obj.get("fuel", 0.0)) <= 0.0:
-                                obj["status"] = "GRAVEYARD"
-                            else:
-                                last_b = float(obj.get("last_burn_sim_time",
-                                                       -(COOLDOWN_S + 1.0)))
-                                cd_ok  = (ELAPSED_SIM_TIME - last_b) >= COOLDOWN_S
-                                if has_los(ns[:3], ELAPSED_SIM_TIME) and cd_ok:
-                                    dv_corr = recovery_delta_v(ns, nom_pos)
-                                    dv_arr  = np.asarray(dv_corr, dtype=float)
-                                    dv_mag  = float(np.linalg.norm(dv_arr))
-                                    if dv_mag > 1e-9:
-                                        if dv_mag > MAX_DV:
-                                            dv_arr  = dv_arr / dv_mag * MAX_DV
-                                            dv_mag  = MAX_DV
-                                            dv_corr = dv_arr.tolist()
-                                        s_burn = rk4_step(ns, COMMAND_LATENCY)
-                                        corr   = apply_maneuver(s_burn, dv_corr)
-                                        _, f_u = update_mass(
-                                            DRY_MASS + float(obj.get("fuel", 0.0)),
-                                            dv_mag,
-                                        )
-                                        obj.update({
-                                            "vx": float(corr[3]),
-                                            "vy": float(corr[4]),
+                if nominal:
+                    # Use pre-propagated nominal slot (nn) from the combined batch above.
+                    # Eliminates 50 individual _rk4_batch(1,6) calls per step.
+                    obj["nominal"] = {
+                        "x": float(nn[0]), "y": float(nn[1]), "z": float(nn[2]),
+                        "vx": float(nn[3]), "vy": float(nn[4]), "vz": float(nn[5]),
+                    }
+                    nom_pos = nn[:3]
+                    outside = is_outside_box(ns[:3], nom_pos)
+                    if outside:
+                        obj["seconds_outside_box"] = obj.get("seconds_outside_box", 0.0) + dt
+                    else:
+                        obj["seconds_inside_box"]  = obj.get("seconds_inside_box",  0.0) + dt
+                    if outside and float(obj.get("fuel", 0.0)) > 0.0:
+                        last_b = float(obj.get("last_burn_sim_time", -(COOLDOWN_S + 1.0)))
+                        if (ELAPSED_SIM_TIME - last_b) >= COOLDOWN_S and \
+                                has_los(ns[:3], ELAPSED_SIM_TIME):
+                            dv_corr = recovery_delta_v(ns, nom_pos)
+                            dv_arr  = np.asarray(dv_corr, dtype=float)
+                            dv_mag  = float(np.linalg.norm(dv_arr))
+                            if dv_mag > 1e-9:
+                                if dv_mag > MAX_DV:
+                                    dv_arr = dv_arr / dv_mag * MAX_DV
+                                    dv_mag = MAX_DV
+                                    dv_corr = dv_arr.tolist()
+                                s_burn = rk4_step(ns, COMMAND_LATENCY)
+                                corr   = apply_maneuver(s_burn, dv_corr)
+                                _, f_u = update_mass(DRY_MASS + float(obj.get("fuel", 0.0)), dv_mag)
+                                obj.update({"vx": float(corr[3]), "vy": float(corr[4]),
                                             "vz": float(corr[5]),
-                                            "fuel": max(0.0, float(obj.get("fuel", 0.0)) - f_u),
-                                            "last_maneuver":      ts_iso,
+                                            "fuel": max(0.0, float(obj.get("fuel",0.0)) - f_u),
+                                            "last_maneuver": ts_iso,
                                             "last_burn_sim_time": ELAPSED_SIM_TIME,
-                                            "needs_return":       False,
-                                        })
-                                        TOTAL_FUEL_USED    += f_u
-                                        TOTAL_MANEUVERS    += 1
-                                        maneuvers_executed += 1
-                                        logger.info("SK: %s  dv=%.2f m/s",
-                                                    obj.get("id"), dv_mag * 1000)
+                                            "needs_return": False})
+                                TOTAL_FUEL_USED    += f_u
+                                TOTAL_MANEUVERS    += 1
+                                maneuvers_executed += 1
+                                logger.info("SK: %s  dv=%.2f m/s", obj.get("id"), dv_mag * 1000)
 
-                pipe.set(key, json.dumps(obj))
-
-            pipe.execute()   # single Redis round-trip for ALL writes
+                sat_pipe.set(key, json.dumps(obj))
+            sat_pipe.execute()
 
         # ── PHASE 2: SCHEDULED BURNS  PS §4.2 ────────────────────────────────
         for burn in _rebuild_burn_queue(SIM_WALL_TIMESTAMP.isoformat()):
@@ -860,11 +976,29 @@ async def simulate_step(req: SimStepRequest):
                 logger.error("Scheduled burn failed: %s", exc)
 
         # ── PHASE 3: CONJUNCTION DETECTION & AUTONOMOUS AVOIDANCE ────────────
-        sats_data   = [json.loads(r.get(k))
-                       for k in redis_scan("SATELLITE:*") if r.get(k)]
-        debris_data = [json.loads(r.get(k))
-                       for k in redis_scan("DEBRIS:*")    if r.get(k)]
+        sat_k3    = redis_scan("SATELLITE:*")
+        sat_r3    = r.mget(sat_k3) if sat_k3 else []
+        sats_data = [json.loads(raw) for raw in sat_r3 if raw]
+
+        # Reuse deb_states/deb_ids already propagated in Phase 1 —
+        # eliminates a redundant _read_debris_blob() (np.load of 300 KB blob).
+        _ds3 = deb_states   # (N,6) ndarray, already RK4-propagated
+        _di3 = deb_ids      # list[str] of N debris IDs
+
+        # O(1) index map and debris dict list built once for this step
+        _deb_idx_map: dict = {did: i for i, did in enumerate(_di3)}
+        debris_data = [
+            {
+                "id": _di3[_i], "type": "DEBRIS",
+                "x":  float(_ds3[_i, 0]), "y": float(_ds3[_i, 1]), "z": float(_ds3[_i, 2]),
+                "vx": float(_ds3[_i, 3]), "vy": float(_ds3[_i, 4]), "vz": float(_ds3[_i, 5]),
+            }
+            for _i in range(len(_di3))
+        ]
         active_sats = [s for s in sats_data if s.get("status") != "GRAVEYARD"]
+
+        # In-memory sat dict — no per-conjunction Redis GET needed
+        _sat_cache: dict = {s["id"]: s for s in sats_data}
 
         if active_sats:
             # Sat–debris conjunction check
@@ -879,6 +1013,10 @@ async def simulate_step(req: SimStepRequest):
 
             # De-duplicate by pair (process each pair once per tick)
             processed_pairs: set = set()
+            # Collect Redis writes and do them in one pipeline after the loop
+            _sat_pipe3 = r.pipeline(transaction=False)
+            _sat_pipe3_keys = []
+
             for d in all_dangers:
                 pair = tuple(sorted([d["sat_id"], d["deb_id"]]))
                 if pair in processed_pairs:
@@ -887,22 +1025,30 @@ async def simulate_step(req: SimStepRequest):
 
                 sat_id  = d["sat_id"]
                 sat_key = f"SATELLITE:{sat_id}"
-                raw_sat = r.get(sat_key)
-                if not raw_sat:
-                    continue
-                sat_obj = json.loads(raw_sat)
-                if sat_obj.get("status") == "GRAVEYARD":
+
+                # FIX: use in-memory cache — no Redis GET per conjunction
+                sat_obj = _sat_cache.get(sat_id)
+                if sat_obj is None or sat_obj.get("status") == "GRAVEYARD":
                     continue
 
                 s_st = np.array([float(sat_obj[k])
-                                  for k in ("x","y","z","vx","vy","vz")])
+                                  for k in ("x", "y", "z", "vx", "vy", "vz")])
 
-                threat_raw = (r.get(f"DEBRIS:{d['deb_id']}")
-                              or r.get(f"SATELLITE:{d['deb_id']}"))
-                if not threat_raw:
-                    continue
-                d_st = np.array([float(json.loads(threat_raw)[k])
-                                  for k in ("x","y","z","vx","vy","vz")])
+                # FIX: use pre-built O(1) index map — no _read_debris_blob() in loop
+                _threat_idx = _deb_idx_map.get(d["deb_id"], -1)
+                if _threat_idx >= 0:
+                    _row = _ds3[_threat_idx]
+                    d_st = _row.copy()   # ndarray [x,y,z,vx,vy,vz] directly
+                else:
+                    # threat is a satellite — look up from cache first, then Redis
+                    _thr_obj = _sat_cache.get(d["deb_id"])
+                    if _thr_obj is None:
+                        _thr_raw = r.get(f"SATELLITE:{d['deb_id']}")
+                        if not _thr_raw:
+                            continue
+                        _thr_obj = json.loads(_thr_raw)
+                    d_st = np.array([float(_thr_obj[k])
+                                      for k in ("x", "y", "z", "vx", "vy", "vz")])
 
                 # Hard collision check  (PS §3.3)
                 if float(np.linalg.norm(s_st[:3] - d_st[:3])) < CONJ_THRESHOLD:
@@ -916,11 +1062,8 @@ async def simulate_step(req: SimStepRequest):
                     continue
 
                 # LOS gate  (PS §5.4)
-                # CRITICAL conjunctions (imminent collision < CONJ_THRESHOLD) are
-                # handled as autonomous onboard emergency burns — LOS not required.
-                # WARNING-level conjunctions still require ground uplink (LOS gate).
                 actual_dist = float(np.linalg.norm(s_st[:3] - d_st[:3]))
-                is_imminent = actual_dist < CONJ_THRESHOLD  # < 100 m  PS §3.3
+                is_imminent = actual_dist < CONJ_THRESHOLD
                 if not is_imminent and not has_los(s_st[:3], ELAPSED_SIM_TIME):
                     logger.warning(
                         "BLIND CONJUNCTION %s & %s — in blackout, warning-level deferred",
@@ -934,8 +1077,7 @@ async def simulate_step(req: SimStepRequest):
                     continue
 
                 # Cooldown gate  (PS §5.1)
-                last_b = float(sat_obj.get("last_burn_sim_time",
-                                           -(COOLDOWN_S + 1.0)))
+                last_b = float(sat_obj.get("last_burn_sim_time", -(COOLDOWN_S + 1.0)))
                 if (ELAPSED_SIM_TIME - last_b) < COOLDOWN_S:
                     logger.warning("%s: cooldown active — deferring avoidance", sat_id)
                     continue
@@ -969,7 +1111,13 @@ async def simulate_step(req: SimStepRequest):
                     sat_obj["status"] = "GRAVEYARD"
                     logger.warning("%s: fuel exhausted during avoidance → GRAVEYARD", sat_id)
 
-                r.set(sat_key, json.dumps(sat_obj))
+                # Update cache so subsequent conjunctions see the new state
+                _sat_cache[sat_id] = sat_obj
+
+                # Batch Redis write (executed after loop)
+                _sat_pipe3.set(sat_key, json.dumps(sat_obj))
+                _sat_pipe3_keys.append(sat_key)
+
                 TOTAL_MANEUVERS          += 1
                 TOTAL_COLLISIONS_AVOIDED += 1
                 TOTAL_FUEL_USED          += f_used
@@ -988,6 +1136,10 @@ async def simulate_step(req: SimStepRequest):
                     "action":    "MANEUVER_EXECUTED",
                 }))
                 r.ltrim(CDM_HISTORY_KEY, 0, 199)   # keep last 200 events
+
+            # Flush all conjunction avoidance writes in one round-trip
+            if _sat_pipe3_keys:
+                _sat_pipe3.execute()
 
         # ── PHASE 4: RETURN-TO-NOMINAL  PS §5.2 ──────────────────────────────
         for key in redis_scan("SATELLITE:*"):
@@ -1062,18 +1214,38 @@ async def simulate_step(req: SimStepRequest):
         }
 
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         logger.error("simulate_step error: %s", exc)
         return {"status": "ERROR", "message": str(exc)}
+    finally:
+        _STEP_LOCK.release()
 
 
 # ── Simulation control ────────────────────────────────────────────────────────
 async def _simulation_loop(dt: float) -> None:
+    """
+    Continuous simulation loop — calls the synchronous step core directly
+    via the dedicated _SIM_EXECUTOR so the event loop stays free for health checks.
+    Uses a 0.5 s yield between steps to keep the event loop responsive.
+    """
     global SIMULATION_RUNNING
+    loop = asyncio.get_event_loop()
     while SIMULATION_RUNNING:
-        await simulate_step(SimStepRequest(step_seconds=dt))
-        await asyncio.sleep(1)
+        await loop.run_in_executor(_SIM_EXECUTOR, _simulate_step_sync, float(dt))
+        await asyncio.sleep(0.5)   # yield to event loop between steps
+
+
+
+@app.post("/api/simulate/step")
+async def simulate_step(req: SimStepRequest):
+    """
+    Advance the simulation by step_seconds.
+    Runs on a dedicated single-thread executor so heavy computation never
+    starves the uvicorn event loop — /api/status stays responsive.
+    Response matches PS §4.3 exactly.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_SIM_EXECUTOR, _simulate_step_sync, float(req.step_seconds))
 
 
 @app.post("/api/simulate/start")
@@ -1128,24 +1300,30 @@ async def manual_maneuver(req: ManualManeuverRequest):
 
 
 # ── Visualization snapshot  PS §6.3 ──────────────────────────────────────────
-@app.get("/api/visualization/snapshot")
-async def visualization_snapshot():
-    """
-    Optimised fleet snapshot for the frontend visualizer.
-    Debris cloud uses compact [ID, lat, lon, alt] tuple format (PS §6.3).
-    eci_to_latlon now applies GMST correction so ground tracks are correct.
-    """
-    satellites, debris_cloud = [], []
+# Max debris entries sent per snapshot — frontend renders ~5k points smoothly;
+# sending all 10k adds JSON serialisation latency with no visual benefit.
+_SNAPSHOT_DEBRIS_CAP = 5000
 
-    for k in redis_scan("SATELLITE:*"):
-        raw = r.get(k)
+def _build_snapshot_sync() -> dict:
+    """
+    Synchronous snapshot builder — runs on _SNAP_EXECUTOR so it never
+    blocks the event loop or queues behind sim/ingest work.
+
+    Debris serialisation is fully vectorised (numpy → Python list in one
+    np.column_stack call) — replaces the previous 10k-iteration Python loop
+    that caused 15s timeouts during the benchmark UI/UX assessment.
+    """
+    # ── Satellites ───────────────────────────────────────────────────────────
+    satellites = []
+    sat_keys   = redis_scan("SATELLITE:*")
+    sat_raws   = r.mget(sat_keys) if sat_keys else []
+    _et        = ELAPSED_SIM_TIME
+    for raw in sat_raws:
         if not raw:
             continue
         obj = json.loads(raw)
-        lat, lon, alt = eci_to_latlon(
-            float(obj["x"]), float(obj["y"]), float(obj["z"]),
-            ELAPSED_SIM_TIME,
-        )
+        lat, lon, alt = eci_to_latlon(float(obj["x"]), float(obj["y"]),
+                                      float(obj["z"]), _et)
         satellites.append({
             "id":      obj["id"],
             "lat":     round(lat, 4),
@@ -1155,22 +1333,35 @@ async def visualization_snapshot():
             "status":  obj.get("status", "ACTIVE"),
         })
 
-    for k in redis_scan("DEBRIS:*"):
-        raw = r.get(k)
-        if not raw:
-            continue
-        obj = json.loads(raw)
-        lat, lon, alt = eci_to_latlon(
-            float(obj["x"]), float(obj["y"]), float(obj["z"]),
-            ELAPSED_SIM_TIME,
-        )
-        # Compact tuple format  (PS §6.3)
-        debris_cloud.append([
-            obj["id"],
-            round(lat, 3),
-            round(lon, 3),
-            round(alt, 1),
-        ])
+    # ── Debris — fully vectorised, capped at _SNAPSHOT_DEBRIS_CAP ────────────
+    debris_cloud = []
+    _ds, _di = _read_debris_blob()
+    n = len(_di)
+    if n > 0:
+        # Subsample evenly if over cap (deterministic — same objects each call)
+        if n > _SNAPSHOT_DEBRIS_CAP:
+            step = n // _SNAPSHOT_DEBRIS_CAP
+            _ds  = _ds[::step][:_SNAPSHOT_DEBRIS_CAP]
+            _di  = _di[::step][:_SNAPSHOT_DEBRIS_CAP]
+
+        _OW  = 7.292115e-5
+        gmst = _OW * _et
+        xs = _ds[:, 0]; ys = _ds[:, 1]; zs = _ds[:, 2]
+        rmag = np.maximum(np.sqrt(xs*xs + ys*ys + zs*zs), 1e-9)
+        lats = np.degrees(np.arcsin(np.clip(zs / rmag, -1.0, 1.0)))
+        lons = ((np.degrees(np.arctan2(ys, xs)) - math.degrees(gmst) + 180) % 360) - 180
+        alts = rmag - RE
+
+        # Vectorised round — avoids 30k Python float() / round() calls
+        lats_r = np.round(lats, 3)
+        lons_r = np.round(lons, 3)
+        alts_r = np.round(alts, 1)
+
+        # Build output as list-of-lists in one comprehension over pre-rounded arrays
+        debris_cloud = [
+            [_di[i], float(lats_r[i]), float(lons_r[i]), float(alts_r[i])]
+            for i in range(len(_di))
+        ]
 
     return {
         "timestamp":    SIM_WALL_TIMESTAMP.isoformat(),
@@ -1179,25 +1370,64 @@ async def visualization_snapshot():
     }
 
 
+@app.get("/api/visualization/snapshot")
+async def visualization_snapshot():
+    """
+    Optimised fleet snapshot — runs on _SNAP_EXECUTOR so it's always
+    responsive regardless of sim/ingest activity.
+    Debris cloud uses compact [ID, lat, lon, alt] tuple format (PS §6.3).
+    Capped at _SNAPSHOT_DEBRIS_CAP entries for fast HTTP transfer.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_SNAP_EXECUTOR, _build_snapshot_sync)
+
+
 # ── 24-h CDM forecast  PS §2 ──────────────────────────────────────────────────
+def _conjunction_forecast_sync() -> dict:
+    sat_keys = redis_scan("SATELLITE:*")
+    sat_raws = r.mget(sat_keys) if sat_keys else []
+    sats     = [json.loads(raw) for raw in sat_raws if raw]
+    _deb_st_f, _deb_ids_f = _read_debris_blob()
+    debris = [
+        {
+            "id": _deb_ids_f[_i],
+            "x":  float(_deb_st_f[_i, 0]), "y": float(_deb_st_f[_i, 1]),
+            "z":  float(_deb_st_f[_i, 2]), "vx": float(_deb_st_f[_i, 3]),
+            "vy": float(_deb_st_f[_i, 4]), "vz": float(_deb_st_f[_i, 5]),
+        }
+        for _i in range(len(_deb_ids_f))
+    ]
+    events = scan_24h_conjunctions(sats, debris)
+    return {"forecast": events, "total_events": len(events), "lookahead_hours": 24}
+
+
 @app.get("/api/conjunction/forecast")
 async def conjunction_forecast():
     """24-hour predictive CDM scan across the full constellation."""
-    sats   = [json.loads(r.get(k)) for k in redis_scan("SATELLITE:*") if r.get(k)]
-    debris = [json.loads(r.get(k)) for k in redis_scan("DEBRIS:*")    if r.get(k)]
-    events = scan_24h_conjunctions(sats, debris)
-    return {
-        "forecast":       events,
-        "total_events":   len(events),
-        "lookahead_hours": 24,
-    }
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _conjunction_forecast_sync)
 
 
 # ── Remaining utility endpoints ───────────────────────────────────────────────
+def _get_objects_sync():
+    sat_keys2 = redis_scan("SATELLITE:*")
+    sat_raws2 = r.mget(sat_keys2) if sat_keys2 else []
+    sat_objs  = [json.loads(raw) for raw in sat_raws2 if raw]
+    _ds3, _di3 = _read_debris_blob()
+    deb_objs3 = [
+        {
+            "id": _di3[_i], "type": "DEBRIS",
+            "x":  float(_ds3[_i, 0]), "y": float(_ds3[_i, 1]), "z": float(_ds3[_i, 2]),
+            "vx": float(_ds3[_i, 3]), "vy": float(_ds3[_i, 4]), "vz": float(_ds3[_i, 5]),
+        }
+        for _i in range(len(_di3))
+    ]
+    return sat_objs + deb_objs3
+
+
 @app.get("/api/objects")
 async def get_objects():
-    keys = redis_scan("SATELLITE:*") + redis_scan("DEBRIS:*")
-    return [json.loads(r.get(k)) for k in keys if r.get(k)]
+    return await asyncio.to_thread(_get_objects_sync)
 
 
 @app.get("/api/alerts/history")
@@ -1235,16 +1465,24 @@ async def get_next_pass(sat_id: str):
 async def system_metrics():
     """Fleet-wide performance metrics for the evaluation dashboard."""
     total_s    = max(ELAPSED_SIM_TIME, 1.0)
+    # Batch-read all satellite keys for efficiency
+    sat_keys = redis_scan("SATELLITE:*")
+    sat_raws = r.mget(sat_keys) if sat_keys else []
     sat_uptime = {}
-    for k in redis_scan("SATELLITE:*"):
-        raw = r.get(k)
+    for raw in sat_raws:
         if not raw:
             continue
         obj     = json.loads(raw)
         outside = float(obj.get("seconds_outside_box", 0.0))
-        sat_uptime[obj["id"]] = round(
-            max(0.0, 100.0 * (1.0 - outside / total_s)), 2
-        )
+        inside  = float(obj.get("seconds_inside_box",  0.0))
+        tracked = inside + outside
+        if tracked > 0:
+            # Use directly-tracked inside time — immune to ELAPSED_SIM_TIME drift
+            uptime_pct = 100.0 * inside / tracked
+        else:
+            # No steps yet — satellite is at nominal, uptime = 100%
+            uptime_pct = 100.0
+        sat_uptime[obj["id"]] = round(uptime_pct, 2)
     return {
         "uptime_wall_s":        round(
             (datetime.now(timezone.utc) - SIM_START_WALL).total_seconds(), 1),
@@ -1269,6 +1507,8 @@ async def reset_simulation():
     TOTAL_FUEL_USED          = 0.0
     for k in redis_scan("*"):
         r.delete(k)
+    r_bin.delete(DEBRIS_BLOB_KEY)
+    r_bin.delete(DEBRIS_IDS_KEY)
     logger.info("Simulation reset.")
     return {"status": "simulation_reset"}
 

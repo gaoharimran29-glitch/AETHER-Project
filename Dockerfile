@@ -72,6 +72,7 @@ WORKDIR /app
 COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir uvloop httptools \
  && rm -rf /root/.cache/pip
 
 # ── Backend source ────────────────────────────────────────────────────────────
@@ -117,6 +118,9 @@ exec uvicorn backend.main:app \\\n\
     --host 0.0.0.0 \\\n\
     --port 8000 \\\n\
     --workers 1 \\\n\
+    --loop uvloop \\\n\
+    --http httptools \\\n\
+    --timeout-keep-alive 120 \\\n\
     --log-level info\n\
 ' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 

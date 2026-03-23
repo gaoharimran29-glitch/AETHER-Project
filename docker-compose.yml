@@ -24,12 +24,16 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
+      # Redis runs in the same container on 127.0.0.1 — be explicit so
+      # it never accidentally resolves to a Docker DNS name.
+      - REDIS_HOST=127.0.0.1
+      - REDIS_PORT=6379
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/status"]
+      test: ["CMD", "curl", "-fsS", "--max-time", "8", "http://localhost:8000/api/status"]
       interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
     # Resource limits — keep image lean and predictable
     deploy:
