@@ -696,7 +696,7 @@ def _ingest_sync(objects: list) -> dict:
                 "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
                 "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
                 "fuel":   ex.get("fuel",   getattr(obj, "fuel", 50.0) or 50.0),
-                "status": ex.get("status", "ACTIVE"),
+                "status": ex.get("status", "NOMINAL"),
                 "nominal": ex.get("nominal", {
                     "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
                     "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
@@ -1330,7 +1330,7 @@ def _build_snapshot_sync() -> dict:
             "lon":     round(lon, 4),
             "alt_km":  round(alt, 2),
             "fuel_kg": round(float(obj.get("fuel", 0.0)), 3),
-            "status":  obj.get("status", "ACTIVE"),
+            "status":  obj.get("status", "NOMINAL"),
         })
 
     # ── Debris — fully vectorised, capped at _SNAPSHOT_DEBRIS_CAP ────────────
