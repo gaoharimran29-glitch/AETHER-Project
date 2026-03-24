@@ -116,32 +116,6 @@ export default function DataIngest({ onDataLoaded, onNotify }) {
           The grading system sends telemetry and steps automatically.
         </div>
       </div>
-
-      {/* API reference */}
-      <div style={{ borderRadius:6, border:'1px solid rgba(30,58,95,.5)', padding:14, background:'rgba(4,10,22,.7)' }}>
-        <div style={{ fontFamily:'var(--font-hud,monospace)', fontSize:11, color:'#475569', letterSpacing:'.12em', marginBottom:12, textTransform:'uppercase' }}>
-          API Endpoints (PS §4)
-        </div>
-        {[
-          ['POST', '/api/telemetry',              '#34d399', 'Ingest satellite + debris state vectors'],
-          ['POST', '/api/maneuver/schedule',       '#34d399', 'Schedule burn sequence for satellite'],
-          ['POST', '/api/simulate/step',           '#34d399', 'Advance simulation by step_seconds'],
-          ['GET',  '/api/visualization/snapshot',  '#4d94ff', 'Frontend snapshot (PS §6.3)'],
-          ['GET',  '/api/conjunction/forecast',    '#4d94ff', '24-hour CDM forecast (PS §2)'],
-          ['GET',  '/api/system/metrics',          '#4d94ff', 'Uptime, fuel, maneuver stats (PS §7)'],
-          ['GET',  '/api/status',                  '#4d94ff', 'Health check (PS §8 Docker)'],
-          ['POST', '/api/reset',                   '#fbbf24', 'Reset simulation state'],
-        ].map(([method, path, color, desc]) => (
-          <div key={path} style={{ display:'flex', gap:8, padding:'5px 0', borderBottom:'1px solid rgba(30,58,95,.2)', fontFamily:'var(--font-mono,monospace)', fontSize:11 }}>
-            <span style={{ color, width:36, flexShrink:0, fontWeight:700 }}>{method}</span>
-            <span style={{ color:'#fbbf24', width:220, flexShrink:0 }}>{path}</span>
-            <span style={{ color:'#334155' }}>{desc}</span>
-          </div>
-        ))}
-        <div style={{ marginTop:12, padding:'10px 12px', borderRadius:4, background:'rgba(10,22,50,.6)', border:'1px solid rgba(30,58,95,.4)' }}>
-        </div>
-      </div>
-
     </div>
   );
 }

@@ -213,3 +213,6 @@ EXPOSE 8000                # ✓ Grader port
 ---
 
 *AETHER — National Space Hackathon 2026 · IIT Delhi*
+*By Team UNIT313*
+*Team Leader - Gaohar Imran* 
+*Team Member - Mohd Ali*

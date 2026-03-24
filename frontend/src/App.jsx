@@ -251,7 +251,7 @@ export default function App() {
         {/* Tab bar */}
         <div style={{ display:'flex', padding:'0 20px', borderTop:'1px solid var(--border)', overflowX:'auto' }}>
           {[
-            { id:'ingest',        icon:'📥', label:'Data Ingest',      badge:!healthy?'OFFLINE':null, badgeRed:!healthy },
+            { id:'ingest',        icon:'📥', label:'Simulation Control',      badge:!healthy?'OFFLINE':null, badgeRed:!healthy },
             { id:'dashboard',     icon:'⬡',  label:'Dashboard' },
             { id:'satellites',    icon:'🛰',  label:'Satellites' },
             { id:'conjunctions',  icon:'⚠',  label:'Conjunctions',     badge:critCnt+warnCnt||null, badgeRed:critCnt>0 },
@@ -275,10 +275,10 @@ export default function App() {
       {/* MAIN */}
       <main style={{ flex:1, padding:16, overflow:'auto' }}>
 
-        {/* ── DATA INGEST ────────────────────────────────────────────────── */}
+        {/* ── Simulation ────────────────────────────────────────────────── */}
         {tab === 'ingest' && (
           <div style={{ display:'grid', gridTemplateColumns:'400px 1fr', gap:16, maxHeight:'calc(100vh - 140px)' }}>
-            <Panel title="Data Ingest & Simulation Control" sub="POST /api/telemetry · PS §4.1" style={{ height:'100%' }}>
+            <Panel title="Simulation Control" sub="POST /api/telemetry · PS §4.1" style={{ height:'100%' }}>
               <DataIngest onDataLoaded={refresh} onNotify={(t,m)=>notify(t,m)} />
             </Panel>
 
@@ -302,18 +302,6 @@ export default function App() {
                   <div>
                     <div style={{ fontFamily:'var(--font-ui)', fontSize:13, color:'var(--text-secondary)', marginBottom:14 }}>
                     Backend is live. The left panel shows real-time simulation state and metrics.
-                  </div>
-                  <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                    {[
-                      ['How judges test','The grading scripts POST telemetry directly to port 8000 via /api/telemetry, then call /api/simulate/step and read /api/system/metrics. No frontend interaction is needed for automated grading.'],
-                      ['How to see results','After the grader sends data, the Dashboard tab auto-activates and shows all satellites and debris in the 3D view and ground track map. Switch to the Satellites tab to see the Bullseye conjunction plot.'],
-                      ['Simulation controls','Use the Step / Start / Stop buttons in the header to manually advance simulation time and observe autonomous collision avoidance in action.'],
-                    ].map(([t,d])=>(
-                      <div key={t} style={{ borderRadius:6, padding:'12px 14px', background:'rgba(10,22,50,.6)', border:'1px solid var(--border)' }}>
-                        <div style={{ fontFamily:'var(--font-hud)', fontSize:12, color:'var(--blue)', marginBottom:6, fontWeight:600 }}>{t}</div>
-                        <div style={{ fontFamily:'var(--font-ui)', fontSize:12, color:'var(--text-muted)', lineHeight:1.6 }}>{d}</div>
-                      </div>
-                    ))}
                   </div>
                   </div>
                 )}
