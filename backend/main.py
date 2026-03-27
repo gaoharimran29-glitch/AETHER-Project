@@ -696,7 +696,7 @@ def _ingest_sync(objects: list) -> dict:
                 "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
                 "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
                 "fuel":   ex.get("fuel",   getattr(obj, "fuel", 50.0) or 50.0),
-                "status": ex.get("status", "NOMINAL"),
+                "status": ex.get("status", "ACTIVE"),
                 "nominal": ex.get("nominal", {
                     "x": obj.r.x, "y": obj.r.y, "z": obj.r.z,
                     "vx": obj.v.x, "vy": obj.v.y, "vz": obj.v.z,
@@ -1051,9 +1051,22 @@ def _simulate_step_sync(dt: float):
                                       for k in ("x", "y", "z", "vx", "vy", "vz")])
 
                 # Hard collision check  (PS §3.3)
-                if float(np.linalg.norm(s_st[:3] - d_st[:3])) < CONJ_THRESHOLD:
+                actual_dist_now = float(np.linalg.norm(s_st[:3] - d_st[:3]))
+                if actual_dist_now < CONJ_THRESHOLD:
                     collisions_detected += 1
                     r.hincrby(ALERT_KEY, "collisions", 1)
+                    # Log collision event to CDM history so Alert Log tab shows it
+                    r.lpush(CDM_HISTORY_KEY, json.dumps({
+                        "alert_id":  f"COL-{int(time.time()*1000)}",
+                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "sat_id":    sat_id,
+                        "deb_id":    d["deb_id"],
+                        "distance":  round(actual_dist_now, 6),
+                        "severity":  "COLLISION",
+                        "prob":      1.0,
+                        "action":    "COLLISION_DETECTED",
+                    }))
+                    r.ltrim(CDM_HISTORY_KEY, 0, 199)
 
                 min_dist, _ = find_tca(s_st, d_st)
                 _, severity = calculate_risk(min_dist)
@@ -1062,9 +1075,20 @@ def _simulate_step_sync(dt: float):
                     continue
 
                 # LOS gate  (PS §5.4)
-                actual_dist = float(np.linalg.norm(s_st[:3] - d_st[:3]))
-                is_imminent = actual_dist < CONJ_THRESHOLD
+                is_imminent = actual_dist_now < CONJ_THRESHOLD
                 if not is_imminent and not has_los(s_st[:3], ELAPSED_SIM_TIME):
+                    # Log the detected conjunction even though we cannot uplink a burn
+                    r.lpush(CDM_HISTORY_KEY, json.dumps({
+                        "alert_id":  f"CDM-{int(time.time()*1000)}",
+                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "sat_id":    sat_id,
+                        "deb_id":    d["deb_id"],
+                        "distance":  round(float(min_dist), 6),
+                        "severity":  severity,
+                        "prob":      0.0,
+                        "action":    "BLACKOUT_NO_UPLINK",
+                    }))
+                    r.ltrim(CDM_HISTORY_KEY, 0, 199)
                     logger.warning(
                         "BLIND CONJUNCTION %s & %s — in blackout, warning-level deferred",
                         sat_id, d["deb_id"],
@@ -1079,6 +1103,18 @@ def _simulate_step_sync(dt: float):
                 # Cooldown gate  (PS §5.1)
                 last_b = float(sat_obj.get("last_burn_sim_time", -(COOLDOWN_S + 1.0)))
                 if (ELAPSED_SIM_TIME - last_b) < COOLDOWN_S:
+                    # Log that we detected it but couldn't act
+                    r.lpush(CDM_HISTORY_KEY, json.dumps({
+                        "alert_id":  f"CDM-{int(time.time()*1000)}",
+                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "sat_id":    sat_id,
+                        "deb_id":    d["deb_id"],
+                        "distance":  round(float(min_dist), 6),
+                        "severity":  severity,
+                        "prob":      0.0,
+                        "action":    "COOLDOWN_DEFERRED",
+                    }))
+                    r.ltrim(CDM_HISTORY_KEY, 0, 199)
                     logger.warning("%s: cooldown active — deferring avoidance", sat_id)
                     continue
 
@@ -1330,7 +1366,7 @@ def _build_snapshot_sync() -> dict:
             "lon":     round(lon, 4),
             "alt_km":  round(alt, 2),
             "fuel_kg": round(float(obj.get("fuel", 0.0)), 3),
-            "status":  obj.get("status", "NOMINAL"),
+            "status":  obj.get("status", "ACTIVE"),
         })
 
     # ── Debris — fully vectorised, capped at _SNAPSHOT_DEBRIS_CAP ────────────
