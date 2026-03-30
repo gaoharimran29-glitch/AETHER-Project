@@ -1051,20 +1051,16 @@ def _simulate_step_sync(dt: float):
                                       for k in ("x", "y", "z", "vx", "vy", "vz")])
 
                 # Hard collision check  (PS §3.3)
-                actual_dist_now = float(np.linalg.norm(s_st[:3] - d_st[:3]))
-                if actual_dist_now < CONJ_THRESHOLD:
+                _now_dist = float(np.linalg.norm(s_st[:3] - d_st[:3]))
+                if _now_dist < CONJ_THRESHOLD:
                     collisions_detected += 1
                     r.hincrby(ALERT_KEY, "collisions", 1)
-                    # Log collision event to CDM history so Alert Log tab shows it
                     r.lpush(CDM_HISTORY_KEY, json.dumps({
                         "alert_id":  f"COL-{int(time.time()*1000)}",
                         "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
-                        "sat_id":    sat_id,
-                        "deb_id":    d["deb_id"],
-                        "distance":  round(actual_dist_now, 6),
-                        "severity":  "COLLISION",
-                        "prob":      1.0,
-                        "action":    "COLLISION_DETECTED",
+                        "sat_id": sat_id, "deb_id": d["deb_id"],
+                        "distance": round(_now_dist, 6), "severity": "COLLISION",
+                        "prob": 1.0, "action": "COLLISION_DETECTED",
                     }))
                     r.ltrim(CDM_HISTORY_KEY, 0, 199)
 
@@ -1074,48 +1070,52 @@ def _simulate_step_sync(dt: float):
                 if severity not in ("CRITICAL", "WARNING"):
                     continue
 
+                # ── CDM detected: log it immediately regardless of what gates follow ──
+                _cdm_action = "DETECTED"
+                _cdm_ts     = f"CDM-{int(time.time()*1000)}-{sat_id[-4:]}"
+
                 # LOS gate  (PS §5.4)
-                is_imminent = actual_dist_now < CONJ_THRESHOLD
+                actual_dist = float(np.linalg.norm(s_st[:3] - d_st[:3]))
+                is_imminent = actual_dist < CONJ_THRESHOLD
                 if not is_imminent and not has_los(s_st[:3], ELAPSED_SIM_TIME):
-                    # Log the detected conjunction even though we cannot uplink a burn
-                    r.lpush(CDM_HISTORY_KEY, json.dumps({
-                        "alert_id":  f"CDM-{int(time.time()*1000)}",
-                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
-                        "sat_id":    sat_id,
-                        "deb_id":    d["deb_id"],
-                        "distance":  round(float(min_dist), 6),
-                        "severity":  severity,
-                        "prob":      0.0,
-                        "action":    "BLACKOUT_NO_UPLINK",
-                    }))
-                    r.ltrim(CDM_HISTORY_KEY, 0, 199)
                     logger.warning(
                         "BLIND CONJUNCTION %s & %s — in blackout, warning-level deferred",
                         sat_id, d["deb_id"],
                     )
+                    _cdm_action = "BLACKOUT_NO_UPLINK"
+                    r.lpush(CDM_HISTORY_KEY, json.dumps({
+                        "alert_id": _cdm_ts, "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "sat_id": sat_id, "deb_id": d["deb_id"],
+                        "distance": round(float(min_dist), 6), "severity": severity,
+                        "prob": 0.0, "action": _cdm_action,
+                    }))
+                    r.ltrim(CDM_HISTORY_KEY, 0, 199)
                     continue
 
                 # Monte Carlo secondary gate
                 prob, _ = monte_carlo_collision_probability(s_st[:3], d_st[:3])
                 if prob <= 0.001:
+                    # Log: detected but probability too low for burn
+                    r.lpush(CDM_HISTORY_KEY, json.dumps({
+                        "alert_id": _cdm_ts, "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "sat_id": sat_id, "deb_id": d["deb_id"],
+                        "distance": round(float(min_dist), 6), "severity": severity,
+                        "prob": round(float(prob), 6), "action": "LOW_PROBABILITY",
+                    }))
+                    r.ltrim(CDM_HISTORY_KEY, 0, 199)
                     continue
 
                 # Cooldown gate  (PS §5.1)
                 last_b = float(sat_obj.get("last_burn_sim_time", -(COOLDOWN_S + 1.0)))
                 if (ELAPSED_SIM_TIME - last_b) < COOLDOWN_S:
-                    # Log that we detected it but couldn't act
+                    logger.warning("%s: cooldown active — deferring avoidance", sat_id)
                     r.lpush(CDM_HISTORY_KEY, json.dumps({
-                        "alert_id":  f"CDM-{int(time.time()*1000)}",
-                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
-                        "sat_id":    sat_id,
-                        "deb_id":    d["deb_id"],
-                        "distance":  round(float(min_dist), 6),
-                        "severity":  severity,
-                        "prob":      0.0,
-                        "action":    "COOLDOWN_DEFERRED",
+                        "alert_id": _cdm_ts, "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "sat_id": sat_id, "deb_id": d["deb_id"],
+                        "distance": round(float(min_dist), 6), "severity": severity,
+                        "prob": round(float(prob), 6), "action": "COOLDOWN_DEFERRED",
                     }))
                     r.ltrim(CDM_HISTORY_KEY, 0, 199)
-                    logger.warning("%s: cooldown active — deferring avoidance", sat_id)
                     continue
 
                 best = find_best_maneuver(s_st, d_st)
