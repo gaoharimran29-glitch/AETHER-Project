@@ -1056,7 +1056,7 @@ def _simulate_step_sync(dt: float):
                     collisions_detected += 1
                     r.hincrby(ALERT_KEY, "collisions", 1)
                     r.lpush(CDM_HISTORY_KEY, json.dumps({
-                        "alert_id":  f"COL-{int(time.time()*1000)}",
+                        "alert_id": f"COL-{int(time.time()*1000)}",
                         "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
                         "sat_id": sat_id, "deb_id": d["deb_id"],
                         "distance": round(_now_dist, 6), "severity": "COLLISION",
@@ -1070,34 +1070,26 @@ def _simulate_step_sync(dt: float):
                 if severity not in ("CRITICAL", "WARNING"):
                     continue
 
-                # ── CDM detected: log it immediately regardless of what gates follow ──
-                _cdm_action = "DETECTED"
-                _cdm_ts     = f"CDM-{int(time.time()*1000)}-{sat_id[-4:]}"
-
                 # LOS gate  (PS §5.4)
-                actual_dist = float(np.linalg.norm(s_st[:3] - d_st[:3]))
-                is_imminent = actual_dist < CONJ_THRESHOLD
+                is_imminent = _now_dist < CONJ_THRESHOLD
                 if not is_imminent and not has_los(s_st[:3], ELAPSED_SIM_TIME):
-                    logger.warning(
-                        "BLIND CONJUNCTION %s & %s — in blackout, warning-level deferred",
-                        sat_id, d["deb_id"],
-                    )
-                    _cdm_action = "BLACKOUT_NO_UPLINK"
                     r.lpush(CDM_HISTORY_KEY, json.dumps({
-                        "alert_id": _cdm_ts, "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "alert_id": f"CDM-{int(time.time()*1000)}",
+                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
                         "sat_id": sat_id, "deb_id": d["deb_id"],
                         "distance": round(float(min_dist), 6), "severity": severity,
-                        "prob": 0.0, "action": _cdm_action,
+                        "prob": 0.0, "action": "BLACKOUT_NO_UPLINK",
                     }))
                     r.ltrim(CDM_HISTORY_KEY, 0, 199)
+                    logger.warning("BLIND CONJUNCTION %s & %s", sat_id, d["deb_id"])
                     continue
 
                 # Monte Carlo secondary gate
                 prob, _ = monte_carlo_collision_probability(s_st[:3], d_st[:3])
                 if prob <= 0.001:
-                    # Log: detected but probability too low for burn
                     r.lpush(CDM_HISTORY_KEY, json.dumps({
-                        "alert_id": _cdm_ts, "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "alert_id": f"CDM-{int(time.time()*1000)}",
+                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
                         "sat_id": sat_id, "deb_id": d["deb_id"],
                         "distance": round(float(min_dist), 6), "severity": severity,
                         "prob": round(float(prob), 6), "action": "LOW_PROBABILITY",
@@ -1108,14 +1100,15 @@ def _simulate_step_sync(dt: float):
                 # Cooldown gate  (PS §5.1)
                 last_b = float(sat_obj.get("last_burn_sim_time", -(COOLDOWN_S + 1.0)))
                 if (ELAPSED_SIM_TIME - last_b) < COOLDOWN_S:
-                    logger.warning("%s: cooldown active — deferring avoidance", sat_id)
                     r.lpush(CDM_HISTORY_KEY, json.dumps({
-                        "alert_id": _cdm_ts, "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+                        "alert_id": f"CDM-{int(time.time()*1000)}",
+                        "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
                         "sat_id": sat_id, "deb_id": d["deb_id"],
                         "distance": round(float(min_dist), 6), "severity": severity,
                         "prob": round(float(prob), 6), "action": "COOLDOWN_DEFERRED",
                     }))
                     r.ltrim(CDM_HISTORY_KEY, 0, 199)
+                    logger.warning("%s: cooldown active — deferring avoidance", sat_id)
                     continue
 
                 best = find_best_maneuver(s_st, d_st)
@@ -1567,6 +1560,42 @@ if _os.path.isdir(_FRONTEND_BUILD):
         if _os.path.isfile(index):
             return FileResponse(index)
         raise HTTPException(status_code=404, detail="Frontend not built")
+
+# ── Test endpoint: directly inject a CDM alert (for demo/video purposes) ────
+@app.post("/api/test/inject_cdm")
+async def inject_test_cdm():
+    """Directly writes test CDM events to the alert log for demo purposes."""
+    import time as _time
+    test_events = [
+        {"alert_id": f"CDM-DEMO-001", "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+         "sat_id": "SAT-DEMO-01", "deb_id": "DEB-DEMO-00001",
+         "distance": 0.045, "severity": "CRITICAL", "prob": 0.82,
+         "action": "MANEUVER_EXECUTED"},
+        {"alert_id": f"CDM-DEMO-002", "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+         "sat_id": "SAT-DEMO-02", "deb_id": "DEB-DEMO-00002",
+         "distance": 0.089, "severity": "CRITICAL", "prob": 0.41,
+         "action": "MANEUVER_EXECUTED"},
+        {"alert_id": f"CDM-DEMO-003", "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+         "sat_id": "SAT-DEMO-03", "deb_id": "DEB-DEMO-00003",
+         "distance": 0.231, "severity": "WARNING", "prob": 0.023,
+         "action": "BLACKOUT_NO_UPLINK"},
+        {"alert_id": f"CDM-DEMO-004", "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+         "sat_id": "SAT-DEMO-04", "deb_id": "DEB-DEMO-00004",
+         "distance": 0.312, "severity": "WARNING", "prob": 0.018,
+         "action": "COOLDOWN_DEFERRED"},
+        {"alert_id": f"CDM-DEMO-005", "timestamp": SIM_WALL_TIMESTAMP.isoformat(),
+         "sat_id": "SAT-DEMO-05", "deb_id": "DEB-DEMO-00005",
+         "distance": 0.055, "severity": "CRITICAL", "prob": 0.71,
+         "action": "MANEUVER_EXECUTED"},
+    ]
+    pipe = r.pipeline(transaction=False)
+    for ev in test_events:
+        pipe.lpush(CDM_HISTORY_KEY, json.dumps(ev))
+    pipe.ltrim(CDM_HISTORY_KEY, 0, 199)
+    pipe.execute()
+    return {"status": "ok", "injected": len(test_events),
+            "message": f"{len(test_events)} CDM events written to Alert Log"}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
