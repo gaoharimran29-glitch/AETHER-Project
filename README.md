@@ -17,10 +17,10 @@ docker build -t aether .
 docker run -p 8000:8000 aether
 
 # 3. Verify the API is live
-curl http://localhost:8000/api/status
+curl http://127.0.0.1:8000/api/status
 
 # 4. Open the dashboard (human judges)
-open http://localhost:8000
+open http://127.0.0.1:8000
 ```
 
 Or with Docker Compose:
@@ -29,7 +29,7 @@ Or with Docker Compose:
 docker compose up --build
 ```
 
-The grading scripts can immediately start POSTing telemetry to `http://localhost:8000/api/telemetry`.
+The grading scripts can immediately start POSTing telemetry to `http://127.0.0.1:8000/api/telemetry`.
 
 ---
 
@@ -108,7 +108,7 @@ AETHER/
 ### Example — Ingest Telemetry (PS §4.1)
 
 ```bash
-curl -X POST http://localhost:8000/api/telemetry \
+curl -X POST http://127.0.0.1:8000/api/telemetry \
   -H "Content-Type: application/json" \
   -d '{
     "timestamp": "2026-03-19T10:00:00.000Z",
@@ -133,23 +133,10 @@ curl -X POST http://localhost:8000/api/telemetry \
 ### Example — Advance Simulation (PS §4.3)
 
 ```bash
-curl -X POST http://localhost:8000/api/simulate/step \
+curl -X POST http://127.0.0.1:8000/api/simulate/step \
   -H "Content-Type: application/json" \
   -d '{"step_seconds": 3600}'
 ```
-
----
-
-## Run the Test Suite
-
-After starting Docker:
-
-```bash
-pip install requests
-python test_system.py
-```
-
-This runs 10 automated tests covering every PS §4 endpoint — the same way the hackathon grading scripts work.
 
 ---
 
