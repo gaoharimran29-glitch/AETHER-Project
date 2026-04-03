@@ -10,7 +10,7 @@
 ```bash
 # 1. Clone the repository
 git clone https://github.com/gaoharimran29-glitch/AETHER-Project
-cd "AETHER PROJECT"
+cd "AETHER-Project"
 
 # 2. Build and run with Docker (single command)
 docker build -t aether .
