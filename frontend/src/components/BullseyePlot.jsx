@@ -99,8 +99,8 @@ export default function BullseyePlot({ satelliteId, conjunctions = [] }) {
       const ang = ((hash % 360) - 90) * Math.PI / 180;
       const x = cx + r * Math.cos(ang), y = cy + r * Math.sin(ang);
       const dist = conj.min_dist_km ?? 0;
-      const isCrit = conj.severity === 'CRITICAL' || dist < 0.5;
-      const isWarn = conj.severity === 'WARNING'  || (dist >= 0.5 && dist < 5);
+      const isCrit = conj.severity === 'CRITICAL' || dist < 1.0;
+      const isWarn = conj.severity === 'WARNING'  || (dist >= 1.0 && dist < 5);
       const col   = isCrit ? '#ef4444' : isWarn ? '#f59e0b' : '#10b981';
       const glow  = isCrit ? 'rgba(239,68,68,.45)' : isWarn ? 'rgba(245,158,11,.35)' : 'rgba(16,185,129,.3)';
 
@@ -140,8 +140,8 @@ export default function BullseyePlot({ satelliteId, conjunctions = [] }) {
     ctx.textAlign = 'left';
 
     // Stats box
-    const cr = active.filter(c => c.severity === 'CRITICAL' || (c.min_dist_km || 0) < 0.5).length;
-    const wr = active.filter(c => c.severity === 'WARNING'  || ((c.min_dist_km || 0) >= 0.5 && (c.min_dist_km || 0) < 5)).length;
+    const cr = active.filter(c => c.severity === 'CRITICAL' || (c.min_dist_km || 0) < 1.0).length;
+    const wr = active.filter(c => c.severity === 'WARNING'  || ((c.min_dist_km || 0) >= 1.0 && (c.min_dist_km || 0) < 5)).length;
     const sf = active.filter(c => c.severity === 'SAFE'     || (c.min_dist_km || 0) >= 5).length;
     ctx.fillStyle = 'rgba(1,8,20,0.8)'; ctx.fillRect(W - 118, 8, 110, 80);
     ctx.strokeStyle = 'rgba(30,80,160,0.4)'; ctx.lineWidth = 0.8; ctx.strokeRect(W-118, 8, 110, 80);
@@ -154,7 +154,7 @@ export default function BullseyePlot({ satelliteId, conjunctions = [] }) {
 
     // Legend
     const ly = H - 72;
-    [['#ef4444','Critical (< 0.5km)'], ['#f59e0b','Warning (< 5km)'], ['#10b981','Safe (≥ 5km)']].forEach(([c, l], i) => {
+    [['#ef4444','Critical (< 1km)'], ['#f59e0b','Warning (< 5km)'], ['#10b981','Safe (≥ 5km)']].forEach(([c, l], i) => {
       ctx.fillStyle = c; ctx.fillRect(10, ly + i * 17, 10, 10);
       ctx.fillStyle = 'rgba(180,200,230,0.7)'; ctx.font = `11px 'Share Tech Mono',monospace`;
       ctx.fillText(l, 25, ly + i * 17 + 9);

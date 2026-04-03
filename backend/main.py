@@ -1359,7 +1359,7 @@ def _build_snapshot_sync() -> dict:
             "lon":     round(lon, 4),
             "alt_km":  round(alt, 2),
             "fuel_kg": round(float(obj.get("fuel", 0.0)), 3),
-            "status":  obj.get("status", "ACTIVE"),
+            "status":  obj.get("status", "NOMINAL") if obj.get("status") != "GRAVEYARD" and not obj.get("needs_return") else obj.get("status", "ACTIVE"),
         })
 
     # ── Debris — fully vectorised, capped at _SNAPSHOT_DEBRIS_CAP ────────────
